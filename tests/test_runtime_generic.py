@@ -273,9 +273,10 @@ def test_runtime_modules_do_not_import_ocr_pipeline() -> None:
         assert "pipelines.ocr" not in contents, runtime_file
 
 
-def test_streaming_executor_runs_with_fake_pipeline_adapter() -> None:
+def test_streaming_executor_runs_with_fake_pipeline_adapter(capsys) -> None:
     adapter = FakePipelineAdapter()
     summary = StreamingRayExecutor(adapter).run()
+    captured = capsys.readouterr()
 
     assert summary["status"] == "success"
     assert summary["run_id"] == "fake-run-001"
@@ -290,3 +291,9 @@ def test_streaming_executor_runs_with_fake_pipeline_adapter() -> None:
     assert adapter.exporter.finalized_run_state.status == "running"
     assert adapter.resume_ledger.run_state is not None
     assert adapter.resume_ledger.run_state.status == "success"
+    assert "[run] run_id=fake-run-001" in captured.out
+    assert "[batch:start] batch_id=batch-00001" in captured.out
+    assert "[op:start] batch_id=batch-00001 op=test_prepare_generic" in captured.out
+    assert "[batch:commit] batch_id=batch-00002" in captured.out
+    assert "[run:finish] run_id=fake-run-001 status=success" in captured.out
+    assert "run fake-run-001:" in captured.err

@@ -21,9 +21,12 @@ from .observability import (
     ExecutionLogger,
     MlflowExecutionLogger,
     MlflowProgressTracker,
+    NullProgressReporter,
+    ProgressReporter,
     StructuredExecutionLogger,
     StructuredMonitor,
     StructuredTracer,
+    TqdmProgressReporter,
 )
 from .resume import ResumeLedger
 
@@ -134,6 +137,12 @@ class StreamingRayExecutor(Executor):
 
         total_items = len(input_rows)
         pending_items = max(total_items - len(completed_item_keys), 0)
+        progress_reporter = self.build_progress_reporter(
+            run_id=bindings.run_id,
+            total_items=total_items,
+            pending_items=pending_items,
+            batch_size=execution.batch_size,
+        )
         tracking_run_id = progress_tracker.log_run_started(
             total_items=total_items,
             uploaded_items=bindings.uploaded_items,
@@ -149,6 +158,7 @@ class StreamingRayExecutor(Executor):
         tracer = StructuredTracer(logger=logger, run_id=bindings.run_id)
         monitor = StructuredMonitor(logger=logger)
         monitor.start_run(run_state)
+        progress_reporter.start_run()
         exported_batches = 0
         output_keys: list[str] = []
 
@@ -161,6 +171,7 @@ class StreamingRayExecutor(Executor):
             ):
                 batch_id = f"batch-{batch_index:05d}"
                 current_batch = list(input_batch)
+                progress_reporter.start_batch(batch_id, batch_index, len(current_batch))
                 for op in resolved_pipeline.all_ops:
                     current_batch = self.apply_op(
                         op=op,
@@ -168,6 +179,7 @@ class StreamingRayExecutor(Executor):
                         batch=current_batch,
                         tracer=tracer,
                         logger=logger,
+                        progress_reporter=progress_reporter,
                     )
                 export_result = exporter.export_batch(batch_id=batch_id, rows=current_batch)
                 self.validate_export_result(
@@ -193,12 +205,14 @@ class StreamingRayExecutor(Executor):
                     reported_output_row_count=batch_commit.output_row_count,
                 )
                 progress_tracker.log_batch_commit(batch_commit, run_state)
+                progress_reporter.commit_batch(batch_commit, run_state)
                 exported_batches += 1
                 output_keys.extend(export_result.output_keys)
             exporter.finalize_run(run_state)
             run_state = resume_ledger.mark_run_finished(run_state)
             monitor.finish_run(run_state)
             progress_tracker.log_run_finished(run_state.status)
+            progress_reporter.finish_run(run_state.status)
             return ExecutorRunSummary(
                 run_id=bindings.run_id,
                 status=run_state.status,
@@ -212,6 +226,7 @@ class StreamingRayExecutor(Executor):
             run_state = resume_ledger.mark_run_failed(run_state, message)
             monitor.fail_run(run_state)
             progress_tracker.log_run_failed(message)
+            progress_reporter.fail_run(message)
             return ExecutorRunSummary(
                 run_id=bindings.run_id,
                 status="failed",
@@ -230,6 +245,23 @@ class StreamingRayExecutor(Executor):
             )
         return StructuredExecutionLogger("training_signal_processing")
 
+    def build_progress_reporter(
+        self,
+        *,
+        run_id: str,
+        total_items: int,
+        pending_items: int,
+        batch_size: int,
+    ) -> ProgressReporter:
+        if total_items <= 0:
+            return NullProgressReporter()
+        return TqdmProgressReporter(
+            run_id=run_id,
+            total_items=total_items,
+            pending_items=pending_items,
+            batch_size=batch_size,
+        )
+
     def apply_op(
         self,
         *,
@@ -238,14 +270,17 @@ class StreamingRayExecutor(Executor):
         batch: Batch,
         tracer: StructuredTracer,
         logger: ExecutionLogger,
+        progress_reporter: ProgressReporter,
     ) -> Batch:
         tracer.trace_before_op(op)
+        progress_reporter.start_op(batch_id, op.name, len(batch))
         rendered_batch = op.process_batch(batch)
         tracer.trace_after_op(op)
         if not isinstance(rendered_batch, list):
             raise PipelineContractError(
                 f"Op '{op.name}' must return a list batch, got {type(rendered_batch).__name__}."
             )
+        progress_reporter.finish_op(batch_id, op.name, len(rendered_batch))
         logger.log_event(
             ExecutionLogEvent(
                 level="INFO",

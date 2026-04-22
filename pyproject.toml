@@ -30,6 +30,7 @@ remote_ocr = [
     "pyarrow>=20.0.0",
     "pyyaml>=6.0.2",
     "ray[data]>=2.49.0",
+    "tqdm>=4.67.1",
 ]
 
 [tool.pytest.ini_options]

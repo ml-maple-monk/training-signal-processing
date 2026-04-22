@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
+import sys
 from abc import ABC, abstractmethod
 
 from ..models import BatchCommit, ExecutionLogEvent, RunState, RuntimeTrackingContext
@@ -221,6 +223,145 @@ class ProgressTracker(ABC):
 
 class ProgressTrackerActor(ProgressTracker):
     """Actor-style observability contract for remote execution."""
+
+
+class ProgressReporter(ABC):
+    @abstractmethod
+    def start_run(self) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def start_batch(self, batch_id: str, batch_index: int, input_row_count: int) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def start_op(self, batch_id: str, op_name: str, input_row_count: int) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def finish_op(self, batch_id: str, op_name: str, output_row_count: int) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def commit_batch(self, batch_commit: BatchCommit, run_state: RunState) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def finish_run(self, status: str) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def fail_run(self, message: str) -> None:
+        raise NotImplementedError
+
+
+class NullProgressReporter(ProgressReporter):
+    def start_run(self) -> None:
+        return None
+
+    def start_batch(self, batch_id: str, batch_index: int, input_row_count: int) -> None:
+        return None
+
+    def start_op(self, batch_id: str, op_name: str, input_row_count: int) -> None:
+        return None
+
+    def finish_op(self, batch_id: str, op_name: str, output_row_count: int) -> None:
+        return None
+
+    def commit_batch(self, batch_commit: BatchCommit, run_state: RunState) -> None:
+        return None
+
+    def finish_run(self, status: str) -> None:
+        return None
+
+    def fail_run(self, message: str) -> None:
+        return None
+
+
+class TqdmProgressReporter(ProgressReporter):
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        total_items: int,
+        pending_items: int,
+        batch_size: int,
+    ) -> None:
+        self.run_id = run_id
+        self.total_items = total_items
+        self.pending_items = pending_items
+        self.batch_size = batch_size
+        self.total_batches = max(1, math.ceil(max(pending_items, 0) / max(batch_size, 1)))
+        self.progress_bar = self.build_progress_bar()
+
+    def build_progress_bar(self):  # type: ignore[no-untyped-def]
+        try:
+            from tqdm import tqdm
+        except ImportError:
+            return None
+        return tqdm(
+            total=self.total_batches,
+            desc=f"run {self.run_id}",
+            unit="batch",
+            dynamic_ncols=True,
+            file=sys.stderr,
+        )
+
+    def write_line(self, message: str) -> None:
+        if self.progress_bar is not None:
+            self.progress_bar.write(message)
+            return
+        print(message, file=sys.stderr)
+
+    def start_run(self) -> None:
+        self.write_line(
+            "[run] "
+            f"run_id={self.run_id} total_items={self.total_items} "
+            f"pending_items={self.pending_items} batch_size={self.batch_size}"
+        )
+
+    def start_batch(self, batch_id: str, batch_index: int, input_row_count: int) -> None:
+        self.write_line(
+            f"[batch:start] batch_id={batch_id} index={batch_index} input_rows={input_row_count}"
+        )
+
+    def start_op(self, batch_id: str, op_name: str, input_row_count: int) -> None:
+        self.write_line(
+            f"[op:start] batch_id={batch_id} op={op_name} input_rows={input_row_count}"
+        )
+
+    def finish_op(self, batch_id: str, op_name: str, output_row_count: int) -> None:
+        self.write_line(
+            f"[op:finish] batch_id={batch_id} op={op_name} output_rows={output_row_count}"
+        )
+
+    def commit_batch(self, batch_commit: BatchCommit, run_state: RunState) -> None:
+        if self.progress_bar is not None:
+            self.progress_bar.update(1)
+            self.progress_bar.set_postfix(
+                success=run_state.success_count,
+                failed=run_state.failed_count,
+                skipped=run_state.skipped_count,
+                pending=run_state.pending_items,
+            )
+        self.write_line(
+            "[batch:commit] "
+            f"batch_id={batch_commit.batch_id} "
+            f"success={batch_commit.success_count} "
+            f"failed={batch_commit.failed_count} "
+            f"skipped={batch_commit.skipped_count} "
+            f"pending_items={run_state.pending_items}"
+        )
+
+    def finish_run(self, status: str) -> None:
+        self.write_line(f"[run:finish] run_id={self.run_id} status={status}")
+        if self.progress_bar is not None:
+            self.progress_bar.close()
+
+    def fail_run(self, message: str) -> None:
+        self.write_line(f"[run:fail] run_id={self.run_id} error={message}")
+        if self.progress_bar is not None:
+            self.progress_bar.close()
 
 
 class MlflowProgressTracker(ProgressTrackerActor):
