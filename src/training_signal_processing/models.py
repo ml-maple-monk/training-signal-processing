@@ -33,19 +33,12 @@ class RayConfig:
 class R2Config:
     config_file: str
     bucket: str
-    raw_pdf_prefix: str
-    output_prefix: str
+    raw_pdf_prefix: str = ""
+    output_prefix: str = ""
     access_key_id: str = ""
     secret_access_key: str = ""
     region: str = ""
     endpoint_url: str = ""
-
-
-@dataclass
-class InputConfig:
-    local_pdf_root: str
-    include_glob: str
-    max_files: int | None = None
 
 
 @dataclass
@@ -64,52 +57,10 @@ class ObservabilityConfig:
 
 
 @dataclass
-class ResumeConfig:
-    strategy: str
-    commit_every_batches: int
-    resume_mode: str
-
-
-@dataclass
 class OpConfig:
     name: str
     type: str = ""
     options: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class RecipeConfig:
-    run_name: str
-    config_version: int
-    ssh: SshConfig
-    remote: RemoteRuntimeConfig
-    ray: RayConfig
-    r2: R2Config
-    input: InputConfig
-    mlflow: MlflowConfig
-    observability: ObservabilityConfig
-    resumability: ResumeConfig
-    ops: list[OpConfig]
-
-
-@dataclass
-class PdfTask:
-    source_r2_key: str
-    relative_path: str
-    source_size_bytes: int
-    source_sha256: str
-
-    @classmethod
-    def from_dict(cls, row: dict[str, Any]) -> "PdfTask":
-        return cls(
-            source_r2_key=str(row["source_r2_key"]),
-            relative_path=str(row["relative_path"]),
-            source_size_bytes=int(row["source_size_bytes"]),
-            source_sha256=str(row["source_sha256"]),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass
@@ -271,21 +222,8 @@ class OpTestResult:
 
 
 @dataclass
-class RuntimeBindings:
-    run_id: str
-    input_manifest_key: str
-    config_object_key: str = ""
-    uploaded_documents: int = 0
-    allow_overwrite: bool = False
-    marker_binary: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass
 class OpRuntimeContext:
-    config: RecipeConfig
+    config: Any
     run_id: str
     object_store: Any
     output_root_key: str
@@ -324,38 +262,3 @@ class OpRuntimeContext:
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         self.__dict__.update(state)
-
-
-@dataclass
-class RunArtifacts:
-    run_id: str
-    input_manifest_key: str
-    config_object_key: str
-    discovered_documents: int
-    uploaded_documents: int = 0
-    is_resume: bool = False
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass
-class SubmissionPlan:
-    run_id: str
-    ssh_target: str
-    remote_root: str
-    bootstrap_command: str
-    remote_command: str
-    input_manifest_key: str
-    config_object_key: str
-    discovered_documents: int
-    uploaded_documents: int = 0
-    is_resume: bool = False
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-    def to_safe_dict(self) -> dict[str, Any]:
-        payload = self.to_dict()
-        payload["remote_command"] = "<redacted remote command>"
-        return payload

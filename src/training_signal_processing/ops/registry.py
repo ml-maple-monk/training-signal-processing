@@ -10,7 +10,7 @@ from .base import FilterOp, MapperOp, Op, PipelineOp
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
 
-importlib.import_module("training_signal_processing.ops.user_ops")
+importlib.import_module("training_signal_processing.custom_ops")
 
 TransformOp = MapperOp | FilterOp | PipelineOp
 

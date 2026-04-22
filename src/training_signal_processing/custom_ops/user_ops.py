@@ -4,28 +4,29 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from time import perf_counter
 
-from ..models import PdfTask
-from ..utils import join_s3_key, utc_isoformat
-from .base import Batch
-from .builtin import (
+from ..ops.base import Batch
+from ..ops.builtin import (
     BatchTransformOp,
     ExportMarkdownMapper,
     MarkerOcrMapper,
     SkipExistingFilter,
     SourcePreparationOp,
 )
+from ..pipelines.ocr.models import PdfTask
+from ..utils import join_s3_key, utc_isoformat
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
 
 """
-ADD NEW CONCRETE USER OPS TO THIS FILE.
+ADD NEW CONCRETE USER OPS TO THIS FILE OR TO ANOTHER MODULE IN THIS DIRECTORY.
 
 Design contract:
 - Define one concrete subclass per user-customized op.
 - Set `op_name` so the class auto-registers on import.
 - Inherit from `SourcePreparationOp`, `BatchTransformOp`, `SkipExistingFilter`,
   or `ExportMarkdownMapper` so the executor can infer the stage automatically.
-- The user should only need to modify this file and the YAML recipe to add a new op.
+- The user should only need to modify files in `custom_ops/` and the YAML recipe
+  to add a new op.
 """
 
 

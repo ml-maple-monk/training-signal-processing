@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from ..models import DocumentResult, ExportBatchResult, RecipeConfig, RunState
+from ..models import DocumentResult, ExportBatchResult, RunState
 from ..ops.base import Batch
+from ..pipelines.ocr.models import RecipeConfig
 from ..storage import ObjectStore
 from ..utils import join_s3_key, write_json_bytes
 

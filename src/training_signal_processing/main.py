@@ -7,9 +7,13 @@ import click
 
 from .models import OpRuntimeContext
 from .ops.registry import RegisteredOpRegistry
-from .recipe import load_recipe_config
-from .runtime.submission import SshRemoteSubmission
-from .storage import R2ObjectStore
+from .pipelines.ocr.config import load_recipe_config
+from .pipelines.ocr.submission import OcrSubmissionAdapter
+from .runtime.submission import (
+    R2ArtifactStore,
+    SshRemoteTransport,
+    SubmissionCoordinator,
+)
 from .utils import join_s3_key, read_jsonl_rows
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
@@ -44,7 +48,7 @@ def list_ops_command() -> None:
         if not descriptions:
             click.echo(
                 "No concrete ops are registered yet. Add a concrete op class to "
-                "src/training_signal_processing/ops/user_ops.py."
+                "src/training_signal_processing/custom_ops/."
             )
             return
         for op_name, stage, op_type in descriptions:
@@ -129,19 +133,24 @@ def submit_remote_pipeline(
     resume_run_id: str | None,
 ) -> dict[str, object]:
     config = load_recipe_config(config_path, overrides)
-    submission = SshRemoteSubmission(
-        config=config,
-        config_path=config_path,
-        overrides=overrides,
+    submission = SubmissionCoordinator(
+        adapter=OcrSubmissionAdapter(
+            config=config,
+            config_path=config_path,
+            overrides=overrides,
+        ),
+        artifact_store=R2ArtifactStore.from_config_file(config.r2),
+        remote_transport=SshRemoteTransport(config.ssh),
     )
-    return submission.submit(dry_run=dry_run, resume_run_id=resume_run_id)
+    return submission.submit(dry_run=dry_run, resume_run_id=resume_run_id).to_safe_dict()
 
 
 def build_op_runtime_context(config, op_name: str) -> OpRuntimeContext:  # type: ignore[no-untyped-def]
+    artifact_store = R2ArtifactStore.from_config_file(config.r2)
     return OpRuntimeContext(
         config=config,
         run_id=f"op-test:{op_name}",
-        object_store=R2ObjectStore.from_config_file(config.r2),
+        object_store=artifact_store.as_object_store(),
         output_root_key=join_s3_key(config.r2.output_prefix, f"op-tests/{op_name}"),
         raw_root_key=config.r2.raw_pdf_prefix,
     )

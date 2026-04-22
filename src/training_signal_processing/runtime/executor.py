@@ -11,18 +11,18 @@ from ..models import (
     ExecutorRunSummary,
     ExportBatchResult,
     OpRuntimeContext,
-    RecipeConfig,
     RunState,
-    RuntimeBindings,
 )
 from ..ops.base import Batch, FilterOp, MapperOp, Op, PipelineOp
 from ..ops.registry import OpRegistry, RegisteredOpRegistry
+from ..pipelines.ocr.models import RecipeConfig, RuntimeBindings
 from ..storage import ObjectStore
 from ..utils import join_s3_key
 from .dataset import ConfiguredRayDatasetBuilder, DatasetBuilder, DatasetHandle, RayDatasetHandle
 from .exporter import Exporter, ObjectStoreMarkdownExporter
 from .observability import (
     ExecutionLogger,
+    MlflowExecutionLogger,
     MlflowProgressTracker,
     Monitor,
     ProgressTracker,
@@ -424,9 +424,15 @@ class ObjectStoreStreamingRayExecutor(StreamingRayExecutor):
 
     def build_execution_logger(self) -> ExecutionLogger:
         if self.execution_logger is None:
-            self.execution_logger = StructuredExecutionLogger(
-                "training_signal_processing.executor"
-            )
+            if self.config.mlflow.enabled:
+                self.execution_logger = MlflowExecutionLogger(
+                    config=self.config,
+                    logger_name="training_signal_processing.executor",
+                )
+            else:
+                self.execution_logger = StructuredExecutionLogger(
+                    "training_signal_processing.executor"
+                )
         return self.execution_logger
 
     def build_tracer(self) -> Tracer:

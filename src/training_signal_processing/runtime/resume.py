@@ -3,7 +3,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from ..models import BatchCommit, DocumentResult, RecipeConfig, RunState
+from ..models import BatchCommit, DocumentResult, RunState
+from ..pipelines.ocr.models import RecipeConfig
 from ..storage import ObjectStore
 from ..utils import join_s3_key, utc_isoformat
 

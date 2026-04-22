@@ -1,25 +1,159 @@
 from __future__ import annotations
 
-import json
 import shlex
 import subprocess
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from urllib.parse import urlparse
+from typing import TYPE_CHECKING
 
-from ..models import PdfTask, RecipeConfig, RunArtifacts, RuntimeBindings, SubmissionPlan
-from ..recipe import load_resolved_recipe_mapping
-from ..storage import R2ObjectStore
-from ..utils import compute_sha256_file, join_s3_key, utc_timestamp
+from ..models import R2Config, SshConfig
+
+if TYPE_CHECKING:
+    from ..storage import R2ObjectStore
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
 
 
-@dataclass
+@dataclass(frozen=True)
 class CommandOutput:
     stdout: str
     stderr: str
+
+
+@dataclass(frozen=True)
+class ArtifactRef:
+    name: str
+    key: str
+    kind: str = "artifact"
+    metadata: dict[str, object] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class BootstrapSpec:
+    command: str
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class RemoteInvocationSpec:
+    command: str
+    env: dict[str, str] = field(default_factory=dict)
+    reverse_tunnels: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "command": self.command,
+            "env": dict(self.env),
+            "reverse_tunnels": list(self.reverse_tunnels),
+        }
+
+    def to_safe_dict(self) -> dict[str, object]:
+        return {
+            "command": "<redacted remote command>",
+            "env_keys": sorted(self.env),
+            "reverse_tunnels": list(self.reverse_tunnels),
+        }
+
+
+@dataclass(frozen=True)
+class PreparedRun:
+    run_id: str
+    remote_root: str
+    sync_paths: tuple[str, ...]
+    bootstrap: BootstrapSpec
+    invocation: RemoteInvocationSpec
+    artifacts: tuple[ArtifactRef, ...] = ()
+    discovered_documents: int = 0
+    uploaded_documents: int = 0
+    is_resume: bool = False
+    metadata: dict[str, object] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "run_id": self.run_id,
+            "remote_root": self.remote_root,
+            "sync_paths": list(self.sync_paths),
+            "bootstrap": self.bootstrap.to_dict(),
+            "invocation": self.invocation.to_dict(),
+            "artifacts": [artifact.to_dict() for artifact in self.artifacts],
+            "discovered_documents": self.discovered_documents,
+            "uploaded_documents": self.uploaded_documents,
+            "is_resume": self.is_resume,
+            "metadata": dict(self.metadata),
+        }
+
+    def to_safe_dict(self) -> dict[str, object]:
+        return {
+            "run_id": self.run_id,
+            "remote_root": self.remote_root,
+            "sync_paths": list(self.sync_paths),
+            "bootstrap": self.bootstrap.to_dict(),
+            "invocation": self.invocation.to_safe_dict(),
+            "artifacts": [artifact.to_dict() for artifact in self.artifacts],
+            "discovered_documents": self.discovered_documents,
+            "uploaded_documents": self.uploaded_documents,
+            "is_resume": self.is_resume,
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass(frozen=True)
+class SubmissionResult:
+    mode: str
+    prepared_run: PreparedRun
+    transport_details: dict[str, object] = field(default_factory=dict)
+    remote_summary: dict[str, object] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, object]:
+        payload = {
+            "mode": self.mode,
+            "prepared_run": self.prepared_run.to_dict(),
+            "transport": dict(self.transport_details),
+        }
+        if self.remote_summary:
+            payload["remote_summary"] = dict(self.remote_summary)
+        return payload
+
+    def to_safe_dict(self) -> dict[str, object]:
+        artifacts_payload = {
+            "run_id": self.prepared_run.run_id,
+            "discovered_documents": self.prepared_run.discovered_documents,
+            "uploaded_documents": self.prepared_run.uploaded_documents,
+            "is_resume": self.prepared_run.is_resume,
+        }
+        for artifact in self.prepared_run.artifacts:
+            artifacts_payload[f"{artifact.name}_key"] = artifact.key
+        plan_payload = {
+            "run_id": self.prepared_run.run_id,
+            "remote_root": self.prepared_run.remote_root,
+            "sync_paths": list(self.prepared_run.sync_paths),
+            "bootstrap_command": self.prepared_run.bootstrap.command,
+            "remote_command": "<redacted remote command>",
+            "discovered_documents": self.prepared_run.discovered_documents,
+            "uploaded_documents": self.prepared_run.uploaded_documents,
+            "is_resume": self.prepared_run.is_resume,
+            **self.transport_details,
+        }
+        if self.prepared_run.invocation.reverse_tunnels:
+            plan_payload["reverse_tunnels"] = list(self.prepared_run.invocation.reverse_tunnels)
+        if self.remote_summary:
+            return {
+                "mode": self.mode,
+                "artifacts": artifacts_payload,
+                "plan": plan_payload,
+                "remote_summary": dict(self.remote_summary),
+            }
+        return {
+            "mode": self.mode,
+            "artifacts": artifacts_payload,
+            "plan": plan_payload,
+        }
 
 
 class CommandRunner(ABC):
@@ -57,287 +191,254 @@ class SubprocessCommandRunner(CommandRunner):
         return CommandOutput(stdout=result.stdout, stderr=result.stderr)
 
 
-class RemoteSubmission(ABC):
+class ArtifactStore(ABC):
+    bucket: str
+
     @abstractmethod
-    def submit(
-        self,
-        *,
-        dry_run: bool,
-        resume_run_id: str | None = None,
-    ) -> dict[str, object]:
+    def exists(self, key: str) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def read_json(self, key: str) -> dict[str, object]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def read_jsonl(self, key: str) -> list[dict[str, object]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def write_json(self, key: str, value: dict[str, object]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def write_jsonl(self, key: str, rows: list[dict[str, object]]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def upload_file(self, path: Path, key: str) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def build_remote_env(self) -> dict[str, str]:
         raise NotImplementedError
 
 
-class SshRemoteSubmission(RemoteSubmission):
-    def __init__(
-        self,
-        config: RecipeConfig,
-        config_path: Path,
-        overrides: list[str] | None = None,
-        command_runner: CommandRunner | None = None,
-    ) -> None:
-        self.config = config
-        self.config_path = config_path
-        self.overrides = overrides or []
-        self.command_runner = command_runner or SubprocessCommandRunner()
-        self.object_store = R2ObjectStore.from_config_file(config.r2)
-        self.project_root = Path(__file__).resolve().parents[3]
+class R2ArtifactStore(ArtifactStore):
+    def __init__(self, object_store: "R2ObjectStore") -> None:
+        self.object_store = object_store
+        self.bucket = object_store.bucket
 
-    def submit(
-        self,
-        *,
-        dry_run: bool,
-        resume_run_id: str | None = None,
-    ) -> dict[str, object]:
-        if resume_run_id:
-            artifacts = self.prepare_resume_artifacts(resume_run_id)
-        else:
-            artifacts = self.prepare_new_run_artifacts(dry_run=dry_run)
-        plan = self.build_submission_plan(artifacts)
-        if dry_run:
-            return {
-                "mode": "dry_run",
-                "artifacts": artifacts.to_dict(),
-                "plan": plan.to_safe_dict(),
-            }
-        self.sync_project(plan.remote_root)
-        self.run_remote_shell(plan.bootstrap_command)
-        remote_output = self.run_remote_shell(plan.remote_command, with_reverse_tunnel=True)
-        remote_summary = self.parse_remote_summary(remote_output.stdout)
+    @classmethod
+    def from_config_file(cls, config: R2Config) -> "R2ArtifactStore":
+        from ..storage import R2ObjectStore
+
+        return cls(R2ObjectStore.from_config_file(config))
+
+    @classmethod
+    def from_environment(cls, config: R2Config) -> "R2ArtifactStore":
+        from ..storage import R2ObjectStore
+
+        return cls(R2ObjectStore.from_environment(config))
+
+    def as_object_store(self) -> "R2ObjectStore":
+        return self.object_store
+
+    def exists(self, key: str) -> bool:
+        return self.object_store.exists(key)
+
+    def read_json(self, key: str) -> dict[str, object]:
+        return self.object_store.read_json(key)
+
+    def read_jsonl(self, key: str) -> list[dict[str, object]]:
+        return self.object_store.read_jsonl(key)
+
+    def write_json(self, key: str, value: dict[str, object]) -> None:
+        self.object_store.write_json(key, value)
+
+    def write_jsonl(self, key: str, rows: list[dict[str, object]]) -> None:
+        self.object_store.write_jsonl(key, rows)
+
+    def upload_file(self, path: Path, key: str) -> None:
+        self.object_store.upload_file(path, key)
+
+    def build_remote_env(self) -> dict[str, str]:
         return {
-            "mode": "executed",
-            "artifacts": artifacts.to_dict(),
-            "plan": plan.to_safe_dict(),
-            "remote_summary": remote_summary,
-        }
-
-    def prepare_new_run_artifacts(self, *, dry_run: bool) -> RunArtifacts:
-        run_id = utc_timestamp()
-        pdf_root = Path(self.config.input.local_pdf_root).expanduser()
-        pdf_paths = self.discover_pdf_paths(pdf_root)
-        input_manifest_key = self.build_control_key(run_id, "input_manifest.jsonl")
-        config_object_key = self.build_control_key(run_id, "recipe.json")
-        if dry_run:
-            return RunArtifacts(
-                run_id=run_id,
-                input_manifest_key=input_manifest_key,
-                config_object_key=config_object_key,
-                discovered_documents=len(pdf_paths),
-                uploaded_documents=0,
-                is_resume=False,
-            )
-        manifest_rows = self.build_pdf_tasks(pdf_root, pdf_paths)
-        uploaded_documents = self.upload_pdf_tasks(pdf_paths, manifest_rows)
-        self.object_store.write_jsonl(
-            input_manifest_key,
-            [task.to_dict() for task in manifest_rows],
-        )
-        self.object_store.write_json(
-            config_object_key,
-            load_resolved_recipe_mapping(self.config_path, self.overrides),
-        )
-        return RunArtifacts(
-            run_id=run_id,
-            input_manifest_key=input_manifest_key,
-            config_object_key=config_object_key,
-            discovered_documents=len(manifest_rows),
-            uploaded_documents=uploaded_documents,
-            is_resume=False,
-        )
-
-    def prepare_resume_artifacts(self, run_id: str) -> RunArtifacts:
-        input_manifest_key = self.build_control_key(run_id, "input_manifest.jsonl")
-        config_object_key = self.build_control_key(run_id, "recipe.json")
-        if not self.object_store.exists(input_manifest_key):
-            raise ValueError(f"Resume manifest not found in R2: {input_manifest_key}")
-        if not self.object_store.exists(config_object_key):
-            raise ValueError(f"Resume recipe object not found in R2: {config_object_key}")
-        manifest_rows = self.object_store.read_jsonl(input_manifest_key)
-        return RunArtifacts(
-            run_id=run_id,
-            input_manifest_key=input_manifest_key,
-            config_object_key=config_object_key,
-            discovered_documents=len(manifest_rows),
-            uploaded_documents=0,
-            is_resume=True,
-        )
-
-    def build_submission_plan(self, artifacts: RunArtifacts) -> SubmissionPlan:
-        ssh_target = f"{self.config.ssh.user}@{self.config.ssh.host}"
-        bindings = RuntimeBindings(
-            run_id=artifacts.run_id,
-            input_manifest_key=artifacts.input_manifest_key,
-            config_object_key=artifacts.config_object_key,
-            uploaded_documents=artifacts.uploaded_documents,
-            allow_overwrite=False,
-        )
-        return SubmissionPlan(
-            run_id=artifacts.run_id,
-            ssh_target=ssh_target,
-            remote_root=self.config.remote.root_dir,
-            bootstrap_command=self.build_bootstrap_command(),
-            remote_command=self.build_remote_command(bindings),
-            input_manifest_key=artifacts.input_manifest_key,
-            config_object_key=artifacts.config_object_key,
-            discovered_documents=artifacts.discovered_documents,
-            uploaded_documents=artifacts.uploaded_documents,
-            is_resume=artifacts.is_resume,
-        )
-
-    def build_bootstrap_command(self) -> str:
-        commands = [
-            f"cd {shlex.quote(self.config.remote.root_dir)}",
-            "command -v uv >/dev/null",
-            f"uv python install {shlex.quote(self.config.remote.python_version)}",
-            "uv sync --group remote_ocr --no-dev",
-        ]
-        return " && ".join(commands)
-
-    def build_remote_command(self, bindings: RuntimeBindings) -> str:
-        env_assignments = self.build_remote_env_assignments()
-        command = [
-            "uv",
-            "run",
-            "--group",
-            "remote_ocr",
-            "python",
-            "-m",
-            "training_signal_processing.runtime.remote_job",
-            "--run-id",
-            bindings.run_id,
-            "--config-object-key",
-            bindings.config_object_key,
-            "--input-manifest-key",
-            bindings.input_manifest_key,
-            "--uploaded-documents",
-            str(bindings.uploaded_documents),
-        ]
-        if bindings.allow_overwrite:
-            command.append("--allow-overwrite")
-        exports = " ".join(
-            f"{name}={shlex.quote(value)}" for name, value in sorted(env_assignments.items())
-        )
-        return (
-            f"cd {shlex.quote(self.config.remote.root_dir)} && "
-            f"export {exports} && "
-            f"{shlex.join(command)}"
-        )
-
-    def build_remote_env_assignments(self) -> dict[str, str]:
-        tracking_uri = self.resolve_remote_tracking_uri()
-        assignments = {
             "R2_BUCKET": self.object_store.bucket,
             "R2_ACCESS_KEY_ID": self.object_store.config.access_key_id,
             "R2_SECRET_ACCESS_KEY": self.object_store.config.secret_access_key,
             "R2_REGION": self.object_store.config.region,
             "R2_ENDPOINT_URL": self.object_store.config.endpoint_url,
         }
-        if tracking_uri:
-            assignments["MLFLOW_TRACKING_URI"] = tracking_uri
-        return assignments
 
-    def resolve_remote_tracking_uri(self) -> str:
-        if not self.config.mlflow.enabled:
-            return ""
-        return f"http://127.0.0.1:{self.config.mlflow.remote_tunnel_port}"
 
-    def discover_pdf_paths(self, pdf_root: Path) -> list[Path]:
-        if not pdf_root.is_dir():
-            raise ValueError(f"Input PDF root not found: {pdf_root}")
-        pdf_paths = sorted(
-            path
-            for path in pdf_root.glob(self.config.input.include_glob)
-            if path.is_file()
-        )
-        if self.config.input.max_files is not None:
-            pdf_paths = pdf_paths[: self.config.input.max_files]
-        if not pdf_paths:
-            raise ValueError(f"No PDF files matched under {pdf_root}")
-        return pdf_paths
+class RemoteTransport(ABC):
+    @abstractmethod
+    def describe(self) -> dict[str, object]:
+        raise NotImplementedError
 
-    def build_pdf_tasks(self, pdf_root: Path, pdf_paths: list[Path]) -> list[PdfTask]:
-        tasks: list[PdfTask] = []
-        for pdf_path in pdf_paths:
-            relative_path = pdf_path.relative_to(pdf_root).as_posix()
-            tasks.append(
-                PdfTask(
-                    source_r2_key=join_s3_key(self.config.r2.raw_pdf_prefix, relative_path),
-                    relative_path=relative_path,
-                    source_size_bytes=pdf_path.stat().st_size,
-                    source_sha256=compute_sha256_file(pdf_path),
-                )
-            )
-        return tasks
+    @abstractmethod
+    def sync(self, *, local_paths: tuple[str, ...], remote_root: str) -> None:
+        raise NotImplementedError
 
-    def upload_pdf_tasks(
+    @abstractmethod
+    def bootstrap(self, *, remote_root: str, spec: BootstrapSpec) -> CommandOutput:
+        raise NotImplementedError
+
+    @abstractmethod
+    def execute(self, *, remote_root: str, spec: RemoteInvocationSpec) -> CommandOutput:
+        raise NotImplementedError
+
+
+class SshRemoteTransport(RemoteTransport):
+    def __init__(
         self,
-        pdf_paths: list[Path],
-        tasks: list[PdfTask],
-    ) -> int:
-        uploaded = 0
-        for pdf_path, task in zip(pdf_paths, tasks, strict=True):
-            self.object_store.upload_file(pdf_path, task.source_r2_key)
-            uploaded += 1
-        return uploaded
+        ssh_config: SshConfig,
+        command_runner: CommandRunner | None = None,
+        project_root: Path | None = None,
+    ) -> None:
+        self.ssh_config = ssh_config
+        self.command_runner = command_runner or SubprocessCommandRunner()
+        self.project_root = project_root or Path(__file__).resolve().parents[3]
 
-    def sync_project(self, remote_root: str) -> None:
-        self.run_remote_shell(f"mkdir -p {shlex.quote(remote_root)}")
+    def describe(self) -> dict[str, object]:
+        return {
+            "transport": "ssh",
+            "ssh_target": self.build_ssh_target(),
+        }
+
+    def sync(self, *, local_paths: tuple[str, ...], remote_root: str) -> None:
+        self._run_remote_shell(f"mkdir -p {shlex.quote(remote_root)}")
         rsync_command = [
             "rsync",
             "-az",
             "-e",
             self.build_rsync_ssh_command(),
-            "pyproject.toml",
-            "uv.lock",
-            "src",
-            "config",
+            *local_paths,
             f"{self.build_ssh_target()}:{remote_root}/",
         ]
         self.command_runner.run(rsync_command, cwd=self.project_root)
 
-    def run_remote_shell(
+    def bootstrap(self, *, remote_root: str, spec: BootstrapSpec) -> CommandOutput:
+        return self._run_remote_shell(
+            self.render_remote_shell_command(
+                remote_root=remote_root,
+                command=spec.command,
+                env={},
+            )
+        )
+
+    def execute(self, *, remote_root: str, spec: RemoteInvocationSpec) -> CommandOutput:
+        return self._run_remote_shell(
+            self.render_remote_shell_command(
+                remote_root=remote_root,
+                command=spec.command,
+                env=spec.env,
+            ),
+            reverse_tunnels=spec.reverse_tunnels,
+        )
+
+    def build_ssh_target(self) -> str:
+        return f"{self.ssh_config.user}@{self.ssh_config.host}"
+
+    def build_rsync_ssh_command(self) -> str:
+        identity_file = str(Path(self.ssh_config.identity_file).expanduser())
+        return f"ssh -i {shlex.quote(identity_file)} -p {self.ssh_config.port}"
+
+    def render_remote_shell_command(
+        self,
+        *,
+        remote_root: str,
+        command: str,
+        env: dict[str, str],
+    ) -> str:
+        if not command.strip():
+            raise ValueError("Remote command must be explicit and non-empty.")
+        prefixes = [f"cd {shlex.quote(remote_root)}"]
+        if env:
+            exported = " ".join(
+                f"{name}={shlex.quote(value)}" for name, value in sorted(env.items())
+            )
+            prefixes.append(f"export {exported}")
+        prefixes.append(command)
+        return " && ".join(prefixes)
+
+    def _run_remote_shell(
         self,
         remote_command: str,
         *,
-        with_reverse_tunnel: bool = False,
+        reverse_tunnels: tuple[str, ...] = (),
     ) -> CommandOutput:
         command = [
             "ssh",
             "-i",
-            str(Path(self.config.ssh.identity_file).expanduser()),
+            str(Path(self.ssh_config.identity_file).expanduser()),
             "-p",
-            str(self.config.ssh.port),
+            str(self.ssh_config.port),
         ]
-        if with_reverse_tunnel and self.config.mlflow.enabled:
-            command.extend(["-R", self.build_reverse_tunnel_spec()])
+        for tunnel in reverse_tunnels:
+            command.extend(["-R", tunnel])
         command.extend([self.build_ssh_target(), remote_command])
         return self.command_runner.run(command)
 
-    def build_ssh_target(self) -> str:
-        return f"{self.config.ssh.user}@{self.config.ssh.host}"
 
-    def build_rsync_ssh_command(self) -> str:
-        identity_file = str(Path(self.config.ssh.identity_file).expanduser())
-        return f"ssh -i {shlex.quote(identity_file)} -p {self.config.ssh.port}"
+class SubmissionAdapter(ABC):
+    @abstractmethod
+    def prepare_new_run(self, artifact_store: ArtifactStore, *, dry_run: bool) -> PreparedRun:
+        raise NotImplementedError
 
-    def build_reverse_tunnel_spec(self) -> str:
-        parsed = urlparse(self.config.mlflow.local_tracking_uri)
-        if not parsed.hostname or not parsed.port:
-            raise ValueError(
-                "mlflow.local_tracking_uri must include an explicit host and port."
-            )
-        return (
-            f"{self.config.mlflow.remote_tunnel_port}:{parsed.hostname}:{parsed.port}"
-        )
+    @abstractmethod
+    def prepare_resume_run(self, artifact_store: ArtifactStore, run_id: str) -> PreparedRun:
+        raise NotImplementedError
 
-    def build_control_key(self, run_id: str, name: str) -> str:
-        return join_s3_key(self.build_run_root(run_id), f"control/{name}")
-
-    def build_run_root(self, run_id: str) -> str:
-        return join_s3_key(self.config.r2.output_prefix, run_id)
-
+    @abstractmethod
     def parse_remote_summary(self, stdout: str) -> dict[str, object]:
-        stripped = stdout.strip()
-        if not stripped:
-            raise ValueError("Remote job returned no JSON summary on stdout.")
-        return json.loads(stripped)
+        raise NotImplementedError
+
+
+class SubmissionCoordinator:
+    def __init__(
+        self,
+        *,
+        adapter: SubmissionAdapter,
+        artifact_store: ArtifactStore,
+        remote_transport: RemoteTransport,
+    ) -> None:
+        self.adapter = adapter
+        self.artifact_store = artifact_store
+        self.remote_transport = remote_transport
+
+    def submit(
+        self,
+        *,
+        dry_run: bool,
+        resume_run_id: str | None = None,
+    ) -> SubmissionResult:
+        if resume_run_id:
+            prepared_run = self.adapter.prepare_resume_run(self.artifact_store, resume_run_id)
+        else:
+            prepared_run = self.adapter.prepare_new_run(self.artifact_store, dry_run=dry_run)
+        transport_details = self.remote_transport.describe()
+        if dry_run:
+            return SubmissionResult(
+                mode="dry_run",
+                prepared_run=prepared_run,
+                transport_details=transport_details,
+            )
+        self.remote_transport.sync(
+            local_paths=prepared_run.sync_paths,
+            remote_root=prepared_run.remote_root,
+        )
+        self.remote_transport.bootstrap(
+            remote_root=prepared_run.remote_root,
+            spec=prepared_run.bootstrap,
+        )
+        remote_output = self.remote_transport.execute(
+            remote_root=prepared_run.remote_root,
+            spec=prepared_run.invocation,
+        )
+        return SubmissionResult(
+            mode="executed",
+            prepared_run=prepared_run,
+            transport_details=transport_details,
+            remote_summary=self.adapter.parse_remote_summary(remote_output.stdout),
+        )

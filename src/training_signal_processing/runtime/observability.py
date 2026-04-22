@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from abc import ABC, abstractmethod
 
-from ..models import BatchCommit, ExecutionLogEvent, RecipeConfig, RunState
+from ..models import BatchCommit, ExecutionLogEvent, RunState
 from ..ops.base import Op
+from ..pipelines.ocr.models import RecipeConfig
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
 
@@ -25,6 +27,88 @@ class StructuredExecutionLogger(ExecutionLogger):
 
     def log_event(self, event: ExecutionLogEvent) -> None:
         self.logger.log(resolve_log_level(event.level), json.dumps(event.to_dict(), sort_keys=True))
+
+
+class MlflowExecutionLogger(StructuredExecutionLogger):
+    def __init__(
+        self,
+        config: RecipeConfig,
+        logger_name: str,
+        artifact_root: str = "execution_logs",
+    ) -> None:
+        super().__init__(logger_name)
+        if not config.mlflow.enabled:
+            raise ValueError("MlflowExecutionLogger requires mlflow.enabled=true in the recipe.")
+        self.config = config
+        self.artifact_root = artifact_root.strip("/") or "execution_logs"
+        self.mlflow_run_id = ""
+        self.event_count = 0
+        self.level_counts: dict[str, int] = {}
+        self.pending_events: list[ExecutionLogEvent] = []
+        self.client = self.load_mlflow_client()
+
+    def log_event(self, event: ExecutionLogEvent) -> None:
+        super().log_event(event)
+        if not self.mlflow_run_id:
+            self.pending_events.append(event)
+            return
+        self.log_event_to_mlflow(event)
+
+    def attach_run_id(self, run_id: str) -> None:
+        if not run_id.strip():
+            raise ValueError("MlflowExecutionLogger.attach_run_id requires a non-empty run_id.")
+        self.client.get_run(run_id)
+        self.mlflow_run_id = run_id
+        for event in self.pending_events:
+            self.log_event_to_mlflow(event)
+        self.pending_events.clear()
+
+    def log_event_to_mlflow(self, event: ExecutionLogEvent) -> None:
+        if not self.mlflow_run_id:
+            raise ValueError("MlflowExecutionLogger cannot log without an attached run_id.")
+        self.event_count += 1
+        level_name = event.level.lower()
+        self.level_counts[level_name] = self.level_counts.get(level_name, 0) + 1
+        self.client.log_metric(
+            self.mlflow_run_id,
+            "execution_event_count",
+            float(self.event_count),
+            step=self.event_count,
+        )
+        self.client.log_metric(
+            self.mlflow_run_id,
+            f"execution_{level_name}_count",
+            float(self.level_counts[level_name]),
+            step=self.event_count,
+        )
+        self.client.set_tag(self.mlflow_run_id, "last_execution_event_code", event.code)
+        self.client.set_tag(self.mlflow_run_id, "last_execution_event_level", event.level.upper())
+        if event.op_name:
+            self.client.set_tag(self.mlflow_run_id, "last_execution_op_name", event.op_name)
+        if event.batch_id:
+            self.client.set_tag(self.mlflow_run_id, "last_execution_batch_id", event.batch_id)
+        self.client.log_dict(
+            self.mlflow_run_id,
+            event.to_dict(),
+            self.build_artifact_path(event),
+        )
+
+    def build_artifact_path(self, event: ExecutionLogEvent) -> str:
+        safe_code = re.sub(r"[^a-zA-Z0-9._-]+", "_", event.code).strip("_")
+        if not safe_code:
+            safe_code = "event"
+        return f"{self.artifact_root}/{self.event_count:05d}-{safe_code}.json"
+
+    def load_mlflow_client(self):  # type: ignore[no-untyped-def]
+        import mlflow
+        from mlflow.tracking import MlflowClient
+
+        tracking_uri = (
+            os.environ.get("MLFLOW_TRACKING_URI")
+            or self.config.mlflow.local_tracking_uri
+        )
+        mlflow.set_tracking_uri(tracking_uri)
+        return MlflowClient(tracking_uri=tracking_uri)
 
 
 class Tracer(ABC):
@@ -156,6 +240,8 @@ class MlflowProgressTracker(ProgressTrackerActor):
         self.mlflow_enabled = config.mlflow.enabled
         self.mlflow_run_id = self.create_mlflow_run_id()
         self.mlflow = self.load_mlflow_client() if self.mlflow_enabled else None
+        if isinstance(self.logger, MlflowExecutionLogger):
+            self.logger.attach_run_id(self.mlflow_run_id)
 
     def get_run_id(self) -> str:
         return self.mlflow_run_id
