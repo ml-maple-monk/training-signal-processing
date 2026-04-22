@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "training-signal-processing"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "duckdb>=1.5.2",
+]
+
+[tool.uv]
+package = true
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "ruff>=0.15.11",
+]
+model = [
+    "torch>=2.5.0",
+    "transformers>=4.51.0",
+]
+remote_ocr = [
+    "boto3>=1.39.0",
+    "click>=8.1.8",
+    "marker-pdf>=1.10.0",
+    "mlflow-skinny>=2.22.0",
+    "pyarrow>=20.0.0",
+    "pyyaml>=6.0.2",
+    "ray[data]>=2.49.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/training_signal_processing"]

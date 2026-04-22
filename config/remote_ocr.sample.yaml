@@ -1,0 +1,57 @@
+run:
+  name: marker-ocr-stream
+  config_version: 1
+
+ssh:
+  host: 74.15.1.150
+  port: 30311
+  user: root
+  identity_file: ~/.ssh/id_ed25519
+
+remote:
+  root_dir: /root/training-signal-processing
+  python_version: "3.12"
+
+ray:
+  executor_type: ray
+  batch_size: 1
+  concurrency: 1
+  target_num_blocks: 32
+
+r2:
+  config_file: r2
+  bucket: gpu-poor
+  raw_pdf_prefix: dataset/raw/pdf
+  output_prefix: dataset/processed/pdf_ocr
+
+input:
+  local_pdf_root: /home/geeyang/workspace/malay-data/bookscrape/data/downloads
+  include_glob: "**/*.pdf"
+  max_files: 5
+
+mlflow:
+  enabled: true
+  local_tracking_uri: http://127.0.0.1:5000
+  remote_tunnel_port: 15000
+  experiment_name: remote-pdf-ocr
+
+observability:
+  flush_interval_sec: 5
+  log_per_file_events: true
+  heartbeat_interval_sec: 10
+
+resumability:
+  strategy: batch_manifest
+  commit_every_batches: 1
+  resume_mode: latest
+
+ops:
+  - name: prepare_pdf_document
+    type: mapper
+  - name: skip_existing
+    type: filter
+  - name: marker_ocr
+    type: mapper
+    force_ocr: true
+  - name: export_markdown
+    type: mapper

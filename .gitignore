@@ -1,0 +1,25 @@
+# Python environments and caches
+.venv/
+.venv-ocr/
+.venv-marker/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local tooling state
+.omx/
+.omc/
+.runtime/
+r2
+.cache/marker_output/
+.cache/marker_benchmark/
+.cache/marker_smoke_output/
+source/data
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
+.ipynb_checkpoints/

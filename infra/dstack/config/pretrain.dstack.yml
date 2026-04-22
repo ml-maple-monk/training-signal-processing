@@ -1,0 +1,70 @@
+# doc-anchor: dstack-task-yaml
+# pretrain.dstack.yml — dstack task for minimind pretraining on Verda spot
+#
+# Usage (via run.sh remote — do not invoke directly):
+#   IMAGE_SHA=<git-short-sha> \
+#   VCR_IMAGE_BASE=vccr.io/<verda-project-uuid>/verda-minimind \
+#   VCR_USERNAME=<verda-registry-user> VCR_PASSWORD=<token> \
+#   HF_TOKEN=<token> MLFLOW_TRACKING_URI=<cf-tunnel-url> \
+#   dstack apply -f dstack/config/pretrain.dstack.yml -y
+#
+# No `files:` stanza — the image is the source of truth.
+# Dataset is downloaded at container start via HF_TOKEN.
+
+type: task
+name: verda-minimind-pretrain
+
+# Verda Container Registry (vccr.io) — colocated with Verda compute,
+# so pulls are fast and don't traverse the public internet.
+image: ${{ env.VCR_IMAGE_BASE }}:${{ env.IMAGE_SHA }}
+registry_auth:
+  username: ${{ env.VCR_USERNAME }}
+  password: ${{ env.VCR_PASSWORD }}
+
+env:
+  # Required — injected by run.sh remote from host files
+  - HF_TOKEN
+  - MLFLOW_TRACKING_URI
+  # Optional overrides with defaults
+  - MLFLOW_EXPERIMENT_NAME=minimind-pretrain-remote
+  - MLFLOW_ARTIFACT_UPLOAD=0
+  - MLFLOW_PEAK_TFLOPS_PER_GPU=0.0
+  - MLFLOW_TIME_TO_TARGET_METRIC=none
+  - MLFLOW_TIME_TO_TARGET_VALUE=0.0
+  - VERDA_PROFILE=remote
+  - DSTACK_RUN_NAME=verda-minimind-pretrain
+  # Dataset/output path overrides (rarely changed)
+  - OUT_DIR=/workspace/out
+  - HF_DATASET_REPO=jingyaogong/minimind_dataset
+  - HF_DATASET_FILENAME=pretrain_t2t_mini.jsonl
+  - HF_PRETOKENIZED_DATASET_REPO=jingyaogong/minimind_dataset
+  - HF_PRETOKENIZED_DATASET_FILENAME=pretokenized/pretrain_t2t_mini.tar.gz
+  - VALIDATION_SPLIT_RATIO=0.0
+  - VALIDATION_INTERVAL_STEPS=0
+
+commands:
+  - bash /opt/training/scripts/remote-entrypoint.sh
+
+# SSH: dstack-runner already runs sshd on :10022 inside the container with
+# AuthorizedKeysFile honoring /root/.ssh/authorized_keys. Our WSL2 pubkey is
+# baked in via Dockerfile.remote's SSH_PUBKEY ARG, so:
+#   ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes verda-minimind-pretrain
+# works after `dstack attach`. No custom sshd, no port 22 forward needed.
+
+resources:
+  gpu:
+    # Any H100/H200/A100 spot; dstack picks by price within max_price
+    name: [H100, H200, A100]
+    count: 1
+
+spot_policy: spot
+max_price: 1.5        # USD/hr — H200 spot ~$1.19; A100 80 ~$0.45; H100 spot ~$0.80
+max_duration: 10m     # safety cap for demo runs
+idle_duration: 0s     # terminate the instance the moment the task exits (no idle billing)
+
+retry:
+  # Retry on infrastructure events only — NOT on training errors (exit != 0)
+  on_events:
+    - no-capacity
+    - interruption
+  duration: 30m       # max total retry window

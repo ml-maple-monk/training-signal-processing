@@ -1,0 +1,17 @@
+# doc-anchor: dstack-fleet-yaml
+type: fleet
+name: verda-spot
+nodes:
+  min: 0
+  max: 2
+resources:
+  gpu:
+    vendor: nvidia
+    name: [H100, H200, A100]
+    count: 1
+backends: [verda]
+spot_policy: spot
+max_price: 1.5
+# Auto-terminate instances after 5 min of idle — prevents orphan billing.
+# dstack default when omitted is INDEFINITE (nil), not 5m.
+idle_duration: 5m
