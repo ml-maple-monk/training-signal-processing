@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from ...core.models import BatchCommit, RunArtifactLayout, RunState
@@ -156,25 +157,21 @@ class OcrResumeLedger(ResumeLedger):
             status = "failed"
         elif run_state.failed_count > 0:
             status = "partial"
-        updated_state = RunState(
-            **{
-                **run_state.to_dict(),
-                "status": status,
-                "pending_items": 0,
-                "updated_at": utc_isoformat(),
-            }
+        updated_state = replace(
+            run_state,
+            status=status,
+            pending_items=0,
+            updated_at=utc_isoformat(),
         )
         self.write_run_state(updated_state)
         return updated_state
 
     def mark_run_failed(self, run_state: RunState, message: str) -> RunState:
-        updated_state = RunState(
-            **{
-                **run_state.to_dict(),
-                "status": "failed",
-                "updated_at": utc_isoformat(),
-                "error_message": message,
-            }
+        updated_state = replace(
+            run_state,
+            status="failed",
+            updated_at=utc_isoformat(),
+            error_message=message,
         )
         self.write_run_state(updated_state)
         return updated_state
