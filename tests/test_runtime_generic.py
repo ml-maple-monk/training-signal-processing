@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from training_signal_processing.models import (
+from training_signal_processing.core.models import (
     BatchCommit,
     OpConfig,
     OpRuntimeContext,
@@ -130,7 +130,7 @@ class FakeExporter(Exporter):
         self.finalized_run_state: RunState | None = None
 
     def export_batch(self, batch_id: str, rows: Batch):
-        from training_signal_processing.models import ExportBatchResult
+        from training_signal_processing.core.models import ExportBatchResult
 
         return ExportBatchResult(
             batch_id=batch_id,
@@ -326,25 +326,47 @@ class FakePipelineAdapter(PipelineRuntimeAdapter):
 
 
 def test_runtime_modules_do_not_import_pipeline_packages() -> None:
-    runtime_dir = (
+    package_dir = (
         Path(__file__).resolve().parents[1]
         / "src"
         / "training_signal_processing"
-        / "runtime"
     )
-    pipeline_dir = runtime_dir.parent / "pipelines"
-    runtime_files = sorted(runtime_dir.glob("*.py"))
-    assert runtime_files
+    runtime_dir = package_dir / "runtime"
+    pipeline_dir = package_dir / "pipelines"
+    shared_dirs = [package_dir / name for name in ("core", "ops", "runtime", "storage")]
+    shared_files = [
+        path for shared_dir in shared_dirs for path in sorted(shared_dir.glob("*.py"))
+    ]
+    assert runtime_dir.exists()
+    assert shared_files
     forbidden_pipeline_names = tuple(
         f"pipelines.{path.name}"
         for path in sorted(pipeline_dir.iterdir())
         if path.is_dir() and not path.name.startswith("__")
     )
     assert forbidden_pipeline_names
-    for runtime_file in runtime_files:
-        contents = runtime_file.read_text(encoding="utf-8")
+    for shared_file in shared_files:
+        contents = shared_file.read_text(encoding="utf-8")
         for forbidden_name in forbidden_pipeline_names:
-            assert forbidden_name not in contents, runtime_file
+            assert forbidden_name not in contents, shared_file
+
+
+def test_root_package_exposes_only_main_entrypoint() -> None:
+    package_dir = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "training_signal_processing"
+    )
+
+    root_python_files = {path.name for path in package_dir.glob("*.py")}
+
+    assert root_python_files == {"main.py"}
+    assert not (package_dir / "__main__.py").exists()
+    assert not (package_dir / "__init__.py").exists()
+    assert not (package_dir / "recipe.py").exists()
+    assert not (package_dir / "models.py").exists()
+    assert not (package_dir / "storage.py").exists()
+    assert not (package_dir / "utils.py").exists()
 
 
 def test_streaming_executor_runs_with_fake_pipeline_adapter(capsys) -> None:

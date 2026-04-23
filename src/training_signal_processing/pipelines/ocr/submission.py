@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
+from ...core.utils import compute_sha256_file, join_s3_key, parse_env_file, utc_timestamp
 from ...runtime.submission import (
     ArtifactRef,
     ArtifactStore,
@@ -16,7 +17,6 @@ from ...runtime.submission import (
     RemoteInvocationSpec,
     SubmissionAdapter,
 )
-from ...utils import compute_sha256_file, join_s3_key, parse_env_file, utc_timestamp
 from .config import load_resolved_recipe_mapping
 from .models import PdfTask, RecipeConfig
 
@@ -166,7 +166,7 @@ class OcrSubmissionAdapter(SubmissionAdapter):
                 "model",
                 "python",
                 "-m",
-                "training_signal_processing",
+                "training_signal_processing.main",
                 "ocr-remote-job",
                 "--run-id",
                 run_id,

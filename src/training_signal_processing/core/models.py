@@ -255,7 +255,7 @@ class OpRuntimeContext:
             return self.object_store
         import os
 
-        from .storage import R2ObjectStore
+        from ..storage.object_store import R2ObjectStore
 
         if os.environ.get("R2_ACCESS_KEY_ID"):
             self.object_store = R2ObjectStore.from_environment(self.config.r2)

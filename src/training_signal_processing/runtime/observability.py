@@ -7,7 +7,7 @@ import os
 import sys
 from abc import ABC, abstractmethod
 
-from ..models import BatchCommit, ExecutionLogEvent, RunState, RuntimeTrackingContext
+from ..core.models import BatchCommit, ExecutionLogEvent, RunState, RuntimeTrackingContext
 from ..ops.base import Op
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.

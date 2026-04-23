@@ -8,6 +8,7 @@ from time import perf_counter
 
 import pyarrow.parquet as pq
 
+from ..core.utils import utc_isoformat
 from ..ops.base import Batch
 from ..ops.builtin import (
     BatchTransformOp,
@@ -16,7 +17,6 @@ from ..ops.builtin import (
     SourcePreparationOp,
 )
 from ..pipelines.tokenizer.models import ParquetShardTask, TokenizedRowResult
-from ..utils import utc_isoformat
 
 
 def _jsonl_gzip_bytes(rows: list[dict[str, object]]) -> bytes:

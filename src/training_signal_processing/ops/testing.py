@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from ..models import ExecutionLogEvent, OpTestResult
+from ..core.models import ExecutionLogEvent, OpTestResult
 from ..runtime.dataset import (
     DatasetBuilder,
     DatasetHandle,

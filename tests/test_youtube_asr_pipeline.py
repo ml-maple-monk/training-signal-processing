@@ -14,7 +14,7 @@ from training_signal_processing.pipelines.youtube_asr.models import (
 )
 from training_signal_processing.pipelines.youtube_asr.resume import YoutubeAsrResumeLedger
 from training_signal_processing.pipelines.youtube_asr.submission import YoutubeAsrSubmissionAdapter
-from training_signal_processing.storage import ObjectStore
+from training_signal_processing.storage.object_store import ObjectStore
 
 
 class FakeR2Store(ObjectStore):
@@ -275,12 +275,12 @@ def test_youtube_asr_ops_transcribe_and_export(
         type("FakeQwenAsrModule", (), {"Qwen3ASRModel": FakeQwen3ASRModel})(),
     )
 
+    from training_signal_processing.core.models import OpRuntimeContext
     from training_signal_processing.custom_ops.youtube_asr_ops import (
         ExportYoutubeTranscriptOp,
         PrepareYoutubeMediaOp,
         Qwen3AsrVllmOp,
     )
-    from training_signal_processing.models import OpRuntimeContext
 
     object_store = FakeR2Store()
     config = load_recipe_config(sample_config)

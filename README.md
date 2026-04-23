@@ -20,6 +20,22 @@ without editing `src/training_signal_processing/runtime/submission.py`.
 
 ## Runtime Boundary
 
+The only root-level Python entrypoint is `src/training_signal_processing/main.py`.
+Invoke shared commands with `python -m training_signal_processing.main ...`.
+The package-level wrapper `python -m training_signal_processing ...` is not supported.
+
+Editable surfaces:
+- `config/`: YAML recipes and run-time tuning values
+- `src/training_signal_processing/custom_ops/`: user-defined ops
+- `src/training_signal_processing/pipelines/<family>/`: pipeline-family schemas, exporters, ledgers, and remote jobs
+
+Protected infrastructure:
+- `src/training_signal_processing/main.py`: CLI entrypoint
+- `src/training_signal_processing/core/`: shared typed runtime models and utilities
+- `src/training_signal_processing/runtime/`: generic executor, submission, resume, and observability flow
+- `src/training_signal_processing/storage/`: object-store infrastructure
+- `src/training_signal_processing/ops/`: shared op base classes and registry
+
 The `runtime/` package is intentionally pipeline-generic:
 - it must not import `pipelines.ocr` or any other concrete pipeline package
 - it owns generic contracts such as submission orchestration, executor flow, exporter interfaces, resume interfaces, and observability
@@ -35,8 +51,8 @@ Concrete behavior belongs in a pipeline family package:
 ```bash
 uv sync --group remote_ocr
 uv run ruff check src/training_signal_processing
-uv run --group remote_ocr python -m training_signal_processing validate --config config/remote_ocr.sample.yaml
-uv run --group remote_ocr python -m training_signal_processing run --config config/remote_ocr.sample.yaml --dry-run
+uv run --group remote_ocr python -m training_signal_processing.main validate --config config/remote_ocr.sample.yaml
+uv run --group remote_ocr python -m training_signal_processing.main run --config config/remote_ocr.sample.yaml --dry-run
 ```
 
 ## Remote Image
@@ -60,11 +76,11 @@ RUNPOD_IMAGE=<your-image> infra/start_runpod_5090.sh
 ## Main Commands
 
 ```bash
-uv run --group remote_ocr python -m training_signal_processing list-ops
-uv run --group remote_ocr python -m training_signal_processing test-op --help
-uv run --group remote_ocr python -m training_signal_processing run --help
-uv run --group remote_ocr python -m training_signal_processing resume --help
-uv run --group remote_ocr python -m training_signal_processing ocr-remote-job --help
+uv run --group remote_ocr python -m training_signal_processing.main list-ops
+uv run --group remote_ocr python -m training_signal_processing.main test-op --help
+uv run --group remote_ocr python -m training_signal_processing.main run --help
+uv run --group remote_ocr python -m training_signal_processing.main resume --help
+uv run --group remote_ocr python -m training_signal_processing.main ocr-remote-job --help
 uv run --group remote_ocr python -m training_signal_processing.pipelines.tokenizer.cli validate --help
 uv run --group remote_ocr python -m training_signal_processing.pipelines.tokenizer.cli run --help
 uv run --group remote_ocr python -m training_signal_processing.pipelines.tokenizer.cli resume --help
@@ -75,7 +91,9 @@ uv run --group remote_ocr python -m training_signal_processing.pipelines.tokeniz
 - `config/`: YAML recipes
 - `src/training_signal_processing/custom_ops/`: user-defined ops and the customization README
 - `src/training_signal_processing/pipelines/`: pipeline-family packages such as OCR and tokenizer
+- `src/training_signal_processing/core/`: protected shared dataclasses and utility helpers
 - `src/training_signal_processing/runtime/`: protected shared runtime infrastructure with no pipeline-specific imports
+- `src/training_signal_processing/storage/`: protected object-store clients and file-system integration
 - `src/training_signal_processing/ops/`: shared base classes and registry
 - `tests/test_runtime_generic.py`: import-boundary and fake-pipeline verification for the generic runtime
 
@@ -96,13 +114,13 @@ For any long-running local or remote task, check MLflow first before assuming a 
 This repo now emits progress there as the generic verification surface.
 
 Always look up the experiment name from the active recipe:
-- shared OCR CLI recipes use `mlflow.experiment_name` from the YAML you passed to `python -m training_signal_processing ...`
+- shared OCR CLI recipes use `mlflow.experiment_name` from the YAML you passed to `python -m training_signal_processing.main ...`
 - family-local CLIs such as `python -m training_signal_processing.pipelines.tokenizer.cli ...` also use `mlflow.experiment_name` from their YAML
 
 Useful launch examples:
 
 ```bash
-uv run --group remote_ocr python -m training_signal_processing run \
+uv run --group remote_ocr python -m training_signal_processing.main run \
   --config config/remote_ocr.sample.yaml
 
 uv run --group remote_ocr python -m training_signal_processing.pipelines.tokenizer.cli run \
@@ -183,6 +201,6 @@ uv run ruff check src tests README.md
 uv run python -m compileall src/training_signal_processing
 uv run --group remote_ocr pytest -q tests/test_runtime_generic.py
 uv run --group remote_ocr pytest -q tests/test_cli_entrypoints.py
-uv run --group remote_ocr python -m training_signal_processing validate --config config/remote_ocr.sample.yaml
-uv run --group remote_ocr python -m training_signal_processing run --config config/remote_ocr.sample.yaml --dry-run
+uv run --group remote_ocr python -m training_signal_processing.main validate --config config/remote_ocr.sample.yaml
+uv run --group remote_ocr python -m training_signal_processing.main run --config config/remote_ocr.sample.yaml --dry-run
 ```

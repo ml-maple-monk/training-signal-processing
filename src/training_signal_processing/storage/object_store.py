@@ -10,8 +10,8 @@ import boto3
 import pyarrow.fs as pafs
 from botocore.exceptions import ClientError
 
-from .models import R2Config
-from .utils import parse_env_file, write_json_bytes, write_jsonl_bytes
+from ..core.models import R2Config
+from ..core.utils import parse_env_file, write_json_bytes, write_jsonl_bytes
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
 

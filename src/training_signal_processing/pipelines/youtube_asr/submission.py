@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+from ...core.utils import join_s3_key, make_s3_url, utc_timestamp
 from ...runtime.submission import (
     ArtifactRef,
     ArtifactStore,
@@ -17,7 +18,6 @@ from ...runtime.submission import (
     RemoteInvocationSpec,
     SubmissionAdapter,
 )
-from ...utils import join_s3_key, make_s3_url, utc_timestamp
 from .config import load_resolved_recipe_mapping
 from .models import RecipeConfig, YoutubeMediaTask
 

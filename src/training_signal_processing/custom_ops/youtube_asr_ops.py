@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import perf_counter
 
+from ..core.utils import utc_isoformat
 from ..ops.base import Batch
 from ..ops.builtin import (
     BatchTransformOp,
@@ -13,7 +14,6 @@ from ..ops.builtin import (
     SourcePreparationOp,
 )
 from ..pipelines.youtube_asr.models import YoutubeMediaTask, YoutubeTranscriptResult
-from ..utils import utc_isoformat
 
 
 class PrepareYoutubeMediaOp(SourcePreparationOp):

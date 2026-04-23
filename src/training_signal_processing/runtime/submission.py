@@ -8,10 +8,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..models import R2Config, SshConfig
+from ..core.models import R2Config, SshConfig
 
 if TYPE_CHECKING:
-    from ..storage import R2ObjectStore
+    from ..storage.object_store import R2ObjectStore
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
 
@@ -320,13 +320,13 @@ class R2ArtifactStore(ArtifactStore):
 
     @classmethod
     def from_config_file(cls, config: R2Config) -> "R2ArtifactStore":
-        from ..storage import R2ObjectStore
+        from ..storage.object_store import R2ObjectStore
 
         return cls(R2ObjectStore.from_config_file(config))
 
     @classmethod
     def from_environment(cls, config: R2Config) -> "R2ArtifactStore":
-        from ..storage import R2ObjectStore
+        from ..storage.object_store import R2ObjectStore
 
         return cls(R2ObjectStore.from_environment(config))
 

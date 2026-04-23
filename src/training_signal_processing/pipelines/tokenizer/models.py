@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from ...models import (
+from ...core.models import (
     MlflowConfig,
     ObservabilityConfig,
     OpConfig,

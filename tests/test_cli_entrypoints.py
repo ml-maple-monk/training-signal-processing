@@ -17,9 +17,9 @@ def test_main_cli_registers_ocr_remote_job_command() -> None:
     assert "ocr-remote-job" in cli.commands
 
 
-def test_package_module_entrypoint_shows_main_help() -> None:
+def test_main_module_entrypoint_shows_help() -> None:
     result = subprocess.run(
-        [sys.executable, "-m", "training_signal_processing", "--help"],
+        [sys.executable, "-m", "training_signal_processing.main", "--help"],
         check=False,
         capture_output=True,
         text=True,
@@ -41,7 +41,7 @@ def test_ocr_submission_uses_package_cli_entrypoint() -> None:
 
     assert prepared.invocation.command.startswith(
         "uv run --python 3.12 --group remote_ocr --group model python -m "
-        "training_signal_processing ocr-remote-job "
+        "training_signal_processing.main ocr-remote-job "
     )
 
 

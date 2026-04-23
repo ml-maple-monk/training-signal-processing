@@ -16,7 +16,7 @@ from training_signal_processing.pipelines.tokenizer.models import (
 )
 from training_signal_processing.pipelines.tokenizer.resume import TokenizerResumeLedger
 from training_signal_processing.pipelines.tokenizer.submission import TokenizerSubmissionAdapter
-from training_signal_processing.storage import ObjectStore
+from training_signal_processing.storage.object_store import ObjectStore
 
 
 class FakeR2Store(ObjectStore):
@@ -282,12 +282,12 @@ def test_tokenize_and_export_ops_use_primary_text_and_fallback_ids(
         type("FakeTransformers", (), {"AutoTokenizer": FakeAutoTokenizer})(),
     )
 
+    from training_signal_processing.core.models import OpRuntimeContext
     from training_signal_processing.custom_ops.tokenizer_ops import (
         ExportTokenJsonlOp,
         PrepareParquetShardOp,
         TokenizeHfTokenIdsOp,
     )
-    from training_signal_processing.models import OpRuntimeContext
 
     class LocalObjectStore(FakeR2Store):
         def __init__(self, source_path: Path) -> None:

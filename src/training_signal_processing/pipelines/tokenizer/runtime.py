@@ -2,19 +2,19 @@ from __future__ import annotations
 
 import os
 
-from ...models import (
+from ...core.models import (
     OpRuntimeContext,
     RunArtifactLayout,
     RuntimeRunBindings,
     RuntimeTrackingContext,
 )
+from ...core.utils import join_s3_key
 from ...ops.registry import OpRegistry, RegisteredOpRegistry
 from ...runtime.executor import PipelineRuntimeAdapter
 from ...runtime.exporter import Exporter
 from ...runtime.observability import ExecutionLogger
 from ...runtime.resume import ResumeLedger
-from ...storage import R2ObjectStore
-from ...utils import join_s3_key
+from ...storage.object_store import R2ObjectStore
 from .exporter import TokenJsonlExporter
 from .models import RecipeConfig
 from .resume import TokenizerResumeLedger

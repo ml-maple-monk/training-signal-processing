@@ -7,7 +7,7 @@ from typing import Any
 import pyarrow as pa
 import ray
 
-from ..models import RayConfig
+from ..core.models import RayConfig
 from ..ops.base import Batch, Op
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.

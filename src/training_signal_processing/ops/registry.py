@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import cast
 
-from ..models import OpConfig, OpRuntimeContext
+from ..core.models import OpConfig, OpRuntimeContext
 from .base import FilterOp, MapperOp, Op, PipelineOp
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.

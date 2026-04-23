@@ -5,10 +5,10 @@ from pathlib import Path
 
 import click
 
-from ...models import R2Config, RuntimeRunBindings
+from ...core.models import R2Config, RuntimeRunBindings
 from ...runtime.executor import Executor, StreamingRayExecutor
 from ...runtime.submission import R2ArtifactStore
-from ...storage import R2ObjectStore
+from ...storage.object_store import R2ObjectStore
 from .config import build_recipe_config
 from .models import RecipeConfig
 from .runtime import OcrPipelineRuntimeAdapter

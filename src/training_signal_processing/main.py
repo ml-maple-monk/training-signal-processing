@@ -5,7 +5,8 @@ from pathlib import Path
 
 import click
 
-from .models import OpRuntimeContext
+from .core.models import OpRuntimeContext
+from .core.utils import join_s3_key, read_jsonl_rows
 from .ops.registry import RegisteredOpRegistry
 from .pipelines.ocr.config import load_recipe_config
 from .pipelines.ocr.remote_job import cli as ocr_remote_job_cli
@@ -15,7 +16,6 @@ from .runtime.submission import (
     SshRemoteTransport,
     SubmissionCoordinator,
 )
-from .utils import join_s3_key, read_jsonl_rows
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
 

@@ -5,7 +5,8 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from time import perf_counter, sleep
 
-from ..models import ExecutionLogEvent
+from ..core.models import ExecutionLogEvent
+from ..core.utils import join_s3_key, utc_isoformat
 from ..ops.base import Batch
 from ..ops.builtin import (
     BatchTransformOp,
@@ -15,7 +16,6 @@ from ..ops.builtin import (
     SourcePreparationOp,
 )
 from ..pipelines.ocr.models import PdfTask
-from ..utils import join_s3_key, utc_isoformat
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
 

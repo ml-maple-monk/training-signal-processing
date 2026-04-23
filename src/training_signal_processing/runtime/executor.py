@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from ..models import (
+from ..core.models import (
     ExecutionLogEvent,
     ExecutorRunSummary,
     OpConfig,
@@ -15,9 +15,9 @@ from ..models import (
     RuntimeRunBindings,
     RuntimeTrackingContext,
 )
+from ..core.utils import utc_isoformat
 from ..ops.base import Batch, Op
 from ..ops.registry import OpRegistry
-from ..utils import utc_isoformat
 from .dataset import ConfiguredRayDatasetBuilder, DatasetBuilder
 from .exporter import Exporter
 from .observability import (

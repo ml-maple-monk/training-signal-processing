@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from training_signal_processing.core.models import OpRuntimeContext
 from training_signal_processing.custom_ops import user_ops
-from training_signal_processing.models import OpRuntimeContext
 from training_signal_processing.pipelines.ocr import config as ocr_config
 from training_signal_processing.pipelines.ocr.config import load_recipe_config
 from training_signal_processing.pipelines.ocr.exporter import OcrMarkdownExporter
