@@ -31,11 +31,15 @@ remote:
 ray:
   executor_type: ray
   batch_size: 1
-  concurrency: 2
-  target_num_blocks: 32
+  concurrency: 8
+  target_num_blocks: 9670
   marker_ocr_resources:
     num_gpus: 0.5
     num_cpus: 3
+  async_upload:
+    enabled: true
+    max_in_flight: 8
+    max_queued: 32
 
 r2:
   config_file: r2
@@ -46,7 +50,6 @@ input:
   local_pdf_root: /home/geeyang/workspace/malay-data/bookscrape/data/downloads
   raw_pdf_prefix: dataset/raw/pdf
   include_glob: "**/*.pdf"
-  max_files: 5
 
 mlflow:
   enabled: true
