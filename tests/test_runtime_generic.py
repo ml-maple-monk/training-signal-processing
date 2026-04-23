@@ -325,30 +325,27 @@ class FakePipelineAdapter(PipelineRuntimeAdapter):
         return self.dataset_builder
 
 
-def test_runtime_modules_do_not_import_pipeline_packages() -> None:
-    package_dir = (
-        Path(__file__).resolve().parents[1]
-        / "src"
-        / "training_signal_processing"
+def test_runtime_modules_do_not_import_pipeline_packages(capsys) -> None:
+    """Enforce via import-linter that shared layers (core, ops, runtime, storage)
+    never import from pipelines (direct or transitive).
+
+    The contract is declared in pyproject.toml under [tool.importlinter]. This test
+    invokes the linter in-process via its public API and asserts exit code 0. When
+    a contract breaks, import-linter prints the violation details to stdout; pytest
+    captures that output and surfaces it on failure.
+    """
+    from importlinter.cli import lint_imports
+
+    repo_root = Path(__file__).resolve().parents[1]
+    config_path = repo_root / "pyproject.toml"
+    exit_code = lint_imports(config_filename=str(config_path))
+
+    captured = capsys.readouterr()
+    assert exit_code == 0, (
+        f"import-linter contract violated:\n"
+        f"stdout:\n{captured.out}\n"
+        f"stderr:\n{captured.err}"
     )
-    runtime_dir = package_dir / "runtime"
-    pipeline_dir = package_dir / "pipelines"
-    shared_dirs = [package_dir / name for name in ("core", "ops", "runtime", "storage")]
-    shared_files = [
-        path for shared_dir in shared_dirs for path in sorted(shared_dir.glob("*.py"))
-    ]
-    assert runtime_dir.exists()
-    assert shared_files
-    forbidden_pipeline_names = tuple(
-        f"pipelines.{path.name}"
-        for path in sorted(pipeline_dir.iterdir())
-        if path.is_dir() and not path.name.startswith("__")
-    )
-    assert forbidden_pipeline_names
-    for shared_file in shared_files:
-        contents = shared_file.read_text(encoding="utf-8")
-        for forbidden_name in forbidden_pipeline_names:
-            assert forbidden_name not in contents, shared_file
 
 
 def test_root_package_exposes_only_main_entrypoint() -> None:

@@ -25,6 +25,7 @@ explicit = true
 
 [dependency-groups]
 dev = [
+    "import-linter>=2.11,<3",
     "pytest>=9.0.3",
     "ruff>=0.15.11",
 ]
@@ -53,6 +54,29 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+
+[tool.importlinter]
+root_packages = [
+    "training_signal_processing.core",
+    "training_signal_processing.ops",
+    "training_signal_processing.runtime",
+    "training_signal_processing.storage",
+    "training_signal_processing.pipelines",
+]
+
+[[tool.importlinter.contracts]]
+name = "shared layers must not import from pipelines"
+type = "forbidden"
+source_modules = [
+    "training_signal_processing.core",
+    "training_signal_processing.ops",
+    "training_signal_processing.runtime",
+    "training_signal_processing.storage",
+]
+forbidden_modules = [
+    "training_signal_processing.pipelines",
+]
+as_packages = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/training_signal_processing"]

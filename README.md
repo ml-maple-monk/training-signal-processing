@@ -46,6 +46,25 @@ Concrete behavior belongs in a pipeline family package:
 - OCR-specific behavior lives in `pipelines/ocr/`
 - user-customized OCR transforms still belong in `custom_ops/`
 
+## Boundary Enforcement
+
+The shared layers (`core/`, `ops/`, `runtime/`, `storage/`) must never import from `pipelines/`.
+That invariant is enforced as a declarative architectural contract via
+[import-linter](https://import-linter.readthedocs.io/), declared in `pyproject.toml` under
+`[tool.importlinter]` and executed by `test_runtime_modules_do_not_import_pipeline_packages`
+in [tests/test_runtime_generic.py](tests/test_runtime_generic.py). The contract detects
+both direct and transitive leaks (e.g. `runtime -> storage -> pipelines.ocr`) and
+fails with the full import chain.
+
+Run it directly:
+
+```bash
+uv run lint-imports
+```
+
+Adding a new shared-layer directory? List it in the contract's `source_modules` so it
+is covered.
+
 ## Quick Start
 
 ```bash
