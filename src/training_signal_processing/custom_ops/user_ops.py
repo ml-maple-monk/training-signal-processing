@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+from hashlib import sha256
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from time import perf_counter, sleep
@@ -210,7 +211,7 @@ class PreparePdfDocumentOp(SourcePreparationOp):
     def process_row(self, row: dict[str, object]) -> dict[str, object]:
         runtime = self.require_runtime()
         task = PdfTask.from_dict(row)
-        markdown_name = Path(task.relative_path).with_suffix(".md").as_posix()
+        markdown_name = build_flat_markdown_name(task.relative_path)
         return {
             "run_id": runtime.run_id,
             "source_r2_key": task.source_r2_key,
@@ -226,6 +227,12 @@ class PreparePdfDocumentOp(SourcePreparationOp):
             "marker_exit_code": 0,
             "markdown_text": "",
         }
+
+
+def build_flat_markdown_name(relative_path: str) -> str:
+    source_name = Path(relative_path).with_suffix(".md").name
+    path_digest = sha256(relative_path.encode("utf-8")).hexdigest()[:16]
+    return f"{path_digest}-{source_name}"
 
 
 class SkipExistingDocumentsOp(SkipExistingFilter):
