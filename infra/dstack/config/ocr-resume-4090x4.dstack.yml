@@ -1,0 +1,36 @@
+# doc-anchor: dstack-ocr-resume-4090x4-yaml
+type: task
+name: training-signal-processing-ocr-4090x4
+
+image: runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
+shell: bash
+
+env:
+  - R2_BUCKET
+  - R2_ACCESS_KEY_ID
+  - R2_SECRET_ACCESS_KEY
+  - R2_REGION
+  - R2_ENDPOINT_URL
+
+commands:
+  - nvidia-smi
+  - 'echo "To connect via SSH, use: ssh ${DSTACK_RUN_NAME}"'
+  - tail -f /dev/null
+
+backends: [runpod]
+regions: [CA, US, EUR-IS-2, US-IL-1]
+resources:
+  gpu:
+    name: "RTX4090"
+    count: 4
+  disk: 200GB..
+
+spot_policy: on-demand
+max_price: 16.0
+max_duration: 24h
+
+retry:
+  on_events:
+    - no-capacity
+    - interruption
+  duration: 1h
