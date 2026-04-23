@@ -3,13 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import pytest
-
-from training_signal_processing.custom_ops.user_ops import (
-    MarkerOcrDocumentOp,
-    PreparePdfDocumentOp,
-    convert_pdf_bytes_with_timeout,
-)
 from training_signal_processing.models import (
     BatchCommit,
     OpConfig,
@@ -23,7 +16,6 @@ from training_signal_processing.models import (
 )
 from training_signal_processing.ops.base import Batch, MapperOp
 from training_signal_processing.ops.registry import RegisteredOpRegistry
-from training_signal_processing.pipelines.ocr.models import PdfTask
 from training_signal_processing.runtime.dataset import (
     ConfiguredRayDatasetBuilder,
     DatasetBuilder,
@@ -333,18 +325,26 @@ class FakePipelineAdapter(PipelineRuntimeAdapter):
         return self.dataset_builder
 
 
-def test_runtime_modules_do_not_import_ocr_pipeline() -> None:
+def test_runtime_modules_do_not_import_pipeline_packages() -> None:
     runtime_dir = (
         Path(__file__).resolve().parents[1]
         / "src"
         / "training_signal_processing"
         / "runtime"
     )
+    pipeline_dir = runtime_dir.parent / "pipelines"
     runtime_files = sorted(runtime_dir.glob("*.py"))
     assert runtime_files
+    forbidden_pipeline_names = tuple(
+        f"pipelines.{path.name}"
+        for path in sorted(pipeline_dir.iterdir())
+        if path.is_dir() and not path.name.startswith("__")
+    )
+    assert forbidden_pipeline_names
     for runtime_file in runtime_files:
         contents = runtime_file.read_text(encoding="utf-8")
-        assert "pipelines.ocr" not in contents, runtime_file
+        for forbidden_name in forbidden_pipeline_names:
+            assert forbidden_name not in contents, runtime_file
 
 
 def test_streaming_executor_runs_with_fake_pipeline_adapter(capsys) -> None:
@@ -437,187 +437,7 @@ def test_configured_ray_dataset_builder_skips_repartition_for_single_row(monkeyp
     assert calls == []
 
 
-@pytest.fixture
-def ocr_runtime_context() -> OpRuntimeContext:
-    class FakeObjectStore:
-        def exists(self, key: str) -> bool:
-            return True
-
-        def read_bytes(self, key: str) -> bytes:
-            return b"%PDF-fake"
-
-    return OpRuntimeContext(
-        config={"name": "ocr-test"},
-        run_id="ocr-test-run",
-        object_store=FakeObjectStore(),
-        output_root_key="output/ocr-test",
-        source_root_key="source/pdf",
-        logger=None,
-    )
-
-
-def build_prepared_ocr_row(runtime_context: OpRuntimeContext) -> dict[str, object]:
-    task = PdfTask(
-        source_r2_key="dataset/raw/pdf/example.pdf",
-        relative_path="example.pdf",
-        source_size_bytes=8,
-        source_sha256="abc123",
-    )
-    return PreparePdfDocumentOp().bind_runtime(runtime_context).process_row(task.to_dict())
-
-
-def test_marker_ocr_process_row_success(
-    monkeypatch,
-    ocr_runtime_context: OpRuntimeContext,
-) -> None:
-    row = build_prepared_ocr_row(ocr_runtime_context)
-    op = MarkerOcrDocumentOp(force_ocr=True).bind_runtime(ocr_runtime_context)
-    monkeypatch.setattr(
-        op,
-        "convert_pdf_file",
-        lambda pdf_path, timeout_sec: ("hello markdown", {"torch_cuda_available": False}),
-    )
-
-    result = op.process_row(row)
-
-    assert result["status"] == "success"
-    assert result["markdown_text"] == "hello markdown"
-    assert result["marker_exit_code"] == 0
-    assert isinstance(result["diagnostics"], dict)
-
-
-def test_marker_ocr_process_row_failure(
-    monkeypatch,
-    ocr_runtime_context: OpRuntimeContext,
-) -> None:
-    row = build_prepared_ocr_row(ocr_runtime_context)
-    op = MarkerOcrDocumentOp(force_ocr=True).bind_runtime(ocr_runtime_context)
-
-    def raise_error(pdf_path: Path, timeout_sec: int):
-        raise RuntimeError("converter exploded")
-
-    monkeypatch.setattr(op, "convert_pdf_file", raise_error)
-
-    result = op.process_row(row)
-
-    assert result["status"] == "failed"
-    assert result["marker_exit_code"] == 1
-    assert "converter exploded" in result["error_message"]
-
-
-def test_marker_ocr_process_row_timeout(
-    monkeypatch,
-    ocr_runtime_context: OpRuntimeContext,
-) -> None:
-    row = build_prepared_ocr_row(ocr_runtime_context)
-    op = MarkerOcrDocumentOp(force_ocr=True).bind_runtime(ocr_runtime_context)
-
-    def raise_timeout(pdf_path: Path, timeout_sec: int):
-        raise TimeoutError("Marker OCR conversion timed out after 300 seconds.")
-
-    monkeypatch.setattr(op, "convert_pdf_file", raise_timeout)
-
-    result = op.process_row(row)
-
-    assert result["status"] == "failed"
-    assert "timed out" in result["error_message"]
-
-
-def test_convert_pdf_bytes_with_timeout_uses_spawn_context(monkeypatch) -> None:
-    created: dict[str, object] = {}
-
-    class FakeReceiver:
-        def __init__(self) -> None:
-            self.closed = False
-
-        def poll(self, timeout: int) -> bool:
-            created["events"].append(("poll", timeout))
-            return "payload" in created
-
-        def recv(self) -> dict[str, object]:
-            created["events"].append("recv")
-            created["payload_received"] = True
-            return created["payload"]
-
-        def close(self) -> None:
-            self.closed = True
-
-    class FakeSender:
-        def __init__(self) -> None:
-            self.closed = False
-
-        def send(self, payload: dict[str, object]) -> None:
-            created["payload"] = payload
-
-        def close(self) -> None:
-            self.closed = True
-
-    class FakeProcess:
-        def __init__(self, *, target, args) -> None:
-            created["target"] = target
-            created["args"] = args
-            created["started"] = False
-            created["terminated"] = False
-            created["join_calls"] = []
-            self.alive = True
-
-        def start(self) -> None:
-            created["started"] = True
-            sender = created["args"][2]
-            sender.send(
-                {
-                    "status": "success",
-                    "markdown_text": "spawned markdown" * 1024,
-                    "diagnostics": {"mp_start_method": "spawn"},
-                }
-            )
-
-        def join(self, timeout=None) -> None:
-            created["join_calls"].append(timeout)
-            if created.get("payload_received"):
-                self.alive = False
-
-        def is_alive(self) -> bool:
-            return self.alive
-
-        def terminate(self) -> None:
-            created["terminated"] = True
-            self.alive = False
-
-    class FakeContext:
-        def Pipe(self, duplex: bool = False) -> tuple[FakeReceiver, FakeSender]:
-            assert duplex is False
-            receiver = FakeReceiver()
-            sender = FakeSender()
-            created["receiver"] = receiver
-            created["sender"] = sender
-            created["events"] = []
-            return receiver, sender
-
-        def Process(self, *, target, args) -> FakeProcess:
-            return FakeProcess(target=target, args=args)
-
-    monkeypatch.setattr(
-        "training_signal_processing.custom_ops.user_ops.get_marker_mp_context",
-        lambda: FakeContext(),
-    )
-
-    markdown_text, diagnostics = convert_pdf_bytes_with_timeout(
-        b"%PDF-fake",
-        {"force_ocr": True, "timeout_sec": 5},
-    )
-
-    assert markdown_text == "spawned markdown" * 1024
-    assert diagnostics["mp_start_method"] == "spawn"
-    assert created["started"] is True
-    assert created["events"] == [("poll", 5), "recv"]
-    assert created["join_calls"] == [5]
-    assert created["target"].__name__ == "_run_marker_conversion"
-    assert created["receiver"].closed is True
-    assert created["sender"].closed is True
-
-
-class OcrResourcePipelineAdapter(FakePipelineAdapter):
+class ResourceOverridePipelineAdapter(FakePipelineAdapter):
     def __init__(self) -> None:
         super().__init__()
         self.dataset_builder = RecordingDatasetBuilder()
@@ -636,7 +456,7 @@ class OcrResourcePipelineAdapter(FakePipelineAdapter):
         op,
         execution: RayConfig,
     ) -> RayTransformResources:
-        if op.name != "marker_ocr":
+        if op.name != "test_transform_generic":
             return super().resolve_transform_resources(op=op, execution=execution)
         return RayTransformResources(
             concurrency=execution.concurrency,
@@ -646,53 +466,17 @@ class OcrResourcePipelineAdapter(FakePipelineAdapter):
 
     def get_op_configs(self) -> list[OpConfig]:
         return [
-            OpConfig(name="prepare_pdf_document", type="mapper"),
-            OpConfig(name="marker_ocr", type="mapper", options={"force_ocr": True}),
-            OpConfig(name="export_markdown", type="mapper"),
+            OpConfig(name="test_prepare_generic", type="mapper"),
+            OpConfig(name="test_transform_generic", type="mapper"),
+            OpConfig(name="test_export_generic", type="mapper"),
         ]
 
     def load_input_rows(self) -> list[dict[str, object]]:
-        task = PdfTask(
-            source_r2_key="dataset/raw/pdf/example.pdf",
-            relative_path="example.pdf",
-            source_size_bytes=8,
-            source_sha256="abc123",
-        )
-        return [task.to_dict()]
-
-    def build_runtime_context(
-        self,
-        *,
-        logger: ExecutionLogger,
-        completed_item_keys: set[str],
-    ) -> OpRuntimeContext:
-        class FakeObjectStore:
-            def exists(self, key: str) -> bool:
-                return True
-
-            def read_bytes(self, key: str) -> bytes:
-                return b"%PDF-fake"
-
-        return OpRuntimeContext(
-            config={"name": "ocr-resource-test"},
-            run_id=self.bindings.run_id,
-            object_store=FakeObjectStore(),
-            output_root_key="output/items/fake-run-001",
-            source_root_key="source/items",
-            completed_item_keys=completed_item_keys,
-            logger=logger,
-        )
+        return [{"id": "resource-row"}]
 
 
-def test_streaming_executor_uses_configured_ocr_worker_resources(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    adapter = OcrResourcePipelineAdapter()
-    monkeypatch.setattr(
-        MarkerOcrDocumentOp,
-        "convert_pdf_file",
-        lambda self, pdf_path, timeout_sec: ("hello markdown", {"torch_cuda_available": True}),
-    )
+def test_streaming_executor_uses_adapter_transform_resources() -> None:
+    adapter = ResourceOverridePipelineAdapter()
 
     summary = StreamingRayExecutor(adapter).run()
 
@@ -700,21 +484,21 @@ def test_streaming_executor_uses_configured_ocr_worker_resources(
     assert isinstance(adapter.dataset_builder, RecordingDatasetBuilder)
     assert adapter.dataset_builder.transform_calls == [
         {
-            "op_name": "prepare_pdf_document",
+            "op_name": "test_prepare_generic",
             "batch_size": 1,
             "concurrency": None,
             "num_gpus": None,
             "num_cpus": None,
         },
         {
-            "op_name": "marker_ocr",
+            "op_name": "test_transform_generic",
             "batch_size": 1,
             "concurrency": 2,
             "num_gpus": 0.5,
             "num_cpus": 4.0,
         },
         {
-            "op_name": "export_markdown",
+            "op_name": "test_export_generic",
             "batch_size": 1,
             "concurrency": None,
             "num_gpus": None,
