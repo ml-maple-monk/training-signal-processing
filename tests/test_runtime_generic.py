@@ -15,6 +15,7 @@ from training_signal_processing.models import (
     OpConfig,
     OpRuntimeContext,
     RayConfig,
+    RayTransformResources,
     RunArtifactLayout,
     RunState,
     RuntimeRunBindings,
@@ -274,8 +275,6 @@ class FakePipelineAdapter(PipelineRuntimeAdapter):
             batch_size=1,
             concurrency=1,
             target_num_blocks=1,
-            ocr_worker_num_gpus=1.0,
-            ocr_worker_num_cpus=4,
         )
 
     def get_tracking_context(self) -> RuntimeTrackingContext:
@@ -404,8 +403,6 @@ def test_configured_ray_dataset_builder_clamps_target_num_blocks(monkeypatch) ->
             batch_size=1,
             concurrency=1,
             target_num_blocks=32,
-            ocr_worker_num_gpus=1.0,
-            ocr_worker_num_cpus=4,
         )
     )
 
@@ -432,8 +429,6 @@ def test_configured_ray_dataset_builder_skips_repartition_for_single_row(monkeyp
             batch_size=1,
             concurrency=1,
             target_num_blocks=32,
-            ocr_worker_num_gpus=1.0,
-            ocr_worker_num_cpus=4,
         )
     )
 
@@ -633,8 +628,20 @@ class OcrResourcePipelineAdapter(FakePipelineAdapter):
             batch_size=1,
             concurrency=2,
             target_num_blocks=1,
-            ocr_worker_num_gpus=0.5,
-            ocr_worker_num_cpus=4,
+        )
+
+    def resolve_transform_resources(
+        self,
+        *,
+        op,
+        execution: RayConfig,
+    ) -> RayTransformResources:
+        if op.name != "marker_ocr":
+            return super().resolve_transform_resources(op=op, execution=execution)
+        return RayTransformResources(
+            concurrency=execution.concurrency,
+            num_gpus=0.5,
+            num_cpus=4.0,
         )
 
     def get_op_configs(self) -> list[OpConfig]:

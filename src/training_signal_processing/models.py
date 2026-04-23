@@ -27,15 +27,22 @@ class RayConfig:
     batch_size: int
     concurrency: int
     target_num_blocks: int
-    ocr_worker_num_gpus: float = 1.0
-    ocr_worker_num_cpus: int = 1
+
+
+@dataclass(frozen=True)
+class RayTransformResources:
+    concurrency: int | None = None
+    num_gpus: float | None = None
+    num_cpus: float | None = None
+
+    def to_dict(self) -> dict[str, int | float | None]:
+        return asdict(self)
 
 
 @dataclass
 class R2Config:
     config_file: str
     bucket: str
-    raw_pdf_prefix: str = ""
     output_prefix: str = ""
     access_key_id: str = ""
     secret_access_key: str = ""
@@ -122,8 +129,7 @@ class RuntimeTrackingContext:
     batch_size: int
     concurrency: int
     target_num_blocks: int | None = None
-    ocr_worker_num_gpus: float | None = None
-    ocr_worker_num_cpus: int | None = None
+    extra_params: dict[str, int | float | str | bool] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

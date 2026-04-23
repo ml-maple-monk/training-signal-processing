@@ -15,6 +15,17 @@ from ...models import (
 
 
 @dataclass
+class OcrRayConfig(RayConfig):
+    ocr_worker_num_gpus: float = 1.0
+    ocr_worker_num_cpus: int = 1
+
+
+@dataclass
+class OcrR2Config(R2Config):
+    raw_pdf_prefix: str = ""
+
+
+@dataclass
 class InputConfig:
     local_pdf_root: str
     include_glob: str
@@ -34,8 +45,8 @@ class RecipeConfig:
     config_version: int
     ssh: SshConfig
     remote: RemoteRuntimeConfig
-    ray: RayConfig
-    r2: R2Config
+    ray: OcrRayConfig
+    r2: OcrR2Config
     input: InputConfig
     mlflow: MlflowConfig
     observability: ObservabilityConfig

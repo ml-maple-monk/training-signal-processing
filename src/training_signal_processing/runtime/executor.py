@@ -9,6 +9,7 @@ from ..models import (
     OpConfig,
     OpRuntimeContext,
     RayConfig,
+    RayTransformResources,
     RunArtifactLayout,
     RunState,
     RuntimeRunBindings,
@@ -96,6 +97,14 @@ class PipelineRuntimeAdapter(ABC):
 
     def resolve_completed_item_keys(self, completed_item_keys: set[str]) -> set[str]:
         return completed_item_keys
+
+    def resolve_transform_resources(
+        self,
+        *,
+        op: Op,
+        execution: RayConfig,
+    ) -> RayTransformResources:
+        return RayTransformResources()
 
 
 class StreamingRayExecutor(Executor):
@@ -406,7 +415,7 @@ class StreamingRayExecutor(Executor):
     ):
         current_dataset = dataset
         for op in resolved_pipeline.all_ops:
-            resources = self.resolve_op_transform_resources(op=op, execution=execution)
+            resources = self.pipeline.resolve_transform_resources(op=op, execution=execution)
             tracer.trace_before_op(op)
             logger.log_event(
                 ExecutionLogEvent(
@@ -417,7 +426,7 @@ class StreamingRayExecutor(Executor):
                     op_name=op.name,
                     details={
                         "batch_size": execution.batch_size,
-                        **resources,
+                        **resources.to_dict(),
                     },
                 )
             )
@@ -425,30 +434,12 @@ class StreamingRayExecutor(Executor):
                 current_dataset,
                 op=op,
                 batch_size=execution.batch_size,
-                concurrency=resources["concurrency"],
-                num_gpus=resources["num_gpus"],
-                num_cpus=resources["num_cpus"],
+                concurrency=resources.concurrency,
+                num_gpus=resources.num_gpus,
+                num_cpus=resources.num_cpus,
             )
             tracer.trace_after_op(op)
         return current_dataset
-
-    def resolve_op_transform_resources(
-        self,
-        *,
-        op: Op,
-        execution: RayConfig,
-    ) -> dict[str, int | float | None]:
-        if op.name == "marker_ocr":
-            return {
-                "concurrency": execution.concurrency,
-                "num_gpus": execution.ocr_worker_num_gpus,
-                "num_cpus": float(execution.ocr_worker_num_cpus),
-            }
-        return {
-            "concurrency": None,
-            "num_gpus": None,
-            "num_cpus": None,
-        }
 
     def validate_contract(
         self,
@@ -467,10 +458,6 @@ class StreamingRayExecutor(Executor):
             raise PipelineContractError("RayConfig.batch_size must be positive.")
         if execution.concurrency <= 0:
             raise PipelineContractError("RayConfig.concurrency must be positive.")
-        if execution.ocr_worker_num_gpus <= 0:
-            raise PipelineContractError("RayConfig.ocr_worker_num_gpus must be positive.")
-        if execution.ocr_worker_num_cpus <= 0:
-            raise PipelineContractError("RayConfig.ocr_worker_num_cpus must be positive.")
         if not tracking.run_name.strip():
             raise PipelineContractError("RuntimeTrackingContext.run_name must be non-empty.")
         if not artifact_layout.source_root_key.strip():

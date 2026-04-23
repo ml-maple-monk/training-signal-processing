@@ -391,10 +391,7 @@ class MlflowProgressTracker(ProgressTrackerActor):
             }
             if self.tracking.target_num_blocks is not None:
                 params["target_num_blocks"] = self.tracking.target_num_blocks
-            if self.tracking.ocr_worker_num_gpus is not None:
-                params["ocr_worker_num_gpus"] = self.tracking.ocr_worker_num_gpus
-            if self.tracking.ocr_worker_num_cpus is not None:
-                params["ocr_worker_num_cpus"] = self.tracking.ocr_worker_num_cpus
+            params.update(self.tracking.extra_params)
             self.mlflow.log_params(params)
             self.mlflow.set_tags(
                 {

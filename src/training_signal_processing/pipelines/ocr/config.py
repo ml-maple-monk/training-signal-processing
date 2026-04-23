@@ -10,12 +10,10 @@ from ...models import (
     MlflowConfig,
     ObservabilityConfig,
     OpConfig,
-    R2Config,
-    RayConfig,
     RemoteRuntimeConfig,
     SshConfig,
 )
-from .models import InputConfig, RecipeConfig, ResumeConfig
+from .models import InputConfig, OcrR2Config, OcrRayConfig, RecipeConfig, ResumeConfig
 
 CURRENT_MACHINE_PATH = Path(__file__).resolve().parents[4] / "infra" / "current-machine"
 
@@ -173,8 +171,8 @@ def build_recipe_config(raw: dict[str, Any], config_path: Path) -> RecipeConfig:
         config_version=int(raw["run"]["config_version"]),
         ssh=SshConfig(**raw["ssh"]),
         remote=RemoteRuntimeConfig(**raw["remote"]),
-        ray=RayConfig(**raw["ray"]),
-        r2=R2Config(**raw["r2"]),
+        ray=OcrRayConfig(**raw["ray"]),
+        r2=OcrR2Config(**raw["r2"]),
         input=InputConfig(**raw["input"]),
         mlflow=MlflowConfig(**raw["mlflow"]),
         observability=ObservabilityConfig(**raw["observability"]),

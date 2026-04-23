@@ -4,10 +4,13 @@ import os
 
 from ...models import (
     OpRuntimeContext,
+    RayConfig,
+    RayTransformResources,
     RunArtifactLayout,
     RuntimeRunBindings,
     RuntimeTrackingContext,
 )
+from ...ops.base import Op
 from ...ops.registry import OpRegistry, RegisteredOpRegistry
 from ...runtime.executor import PipelineRuntimeAdapter
 from ...runtime.exporter import Exporter
@@ -48,8 +51,10 @@ class OcrPipelineRuntimeAdapter(PipelineRuntimeAdapter):
             batch_size=self.config.ray.batch_size,
             concurrency=self.config.ray.concurrency,
             target_num_blocks=self.config.ray.target_num_blocks,
-            ocr_worker_num_gpus=self.config.ray.ocr_worker_num_gpus,
-            ocr_worker_num_cpus=self.config.ray.ocr_worker_num_cpus,
+            extra_params={
+                "ocr_worker_num_gpus": self.config.ray.ocr_worker_num_gpus,
+                "ocr_worker_num_cpus": self.config.ray.ocr_worker_num_cpus,
+            },
         )
 
     def get_op_configs(self):
@@ -95,3 +100,17 @@ class OcrPipelineRuntimeAdapter(PipelineRuntimeAdapter):
         if self.bindings.allow_overwrite:
             return set()
         return completed_item_keys
+
+    def resolve_transform_resources(
+        self,
+        *,
+        op: Op,
+        execution: RayConfig,
+    ) -> RayTransformResources:
+        if op.name != "marker_ocr":
+            return super().resolve_transform_resources(op=op, execution=execution)
+        return RayTransformResources(
+            concurrency=execution.concurrency,
+            num_gpus=self.config.ray.ocr_worker_num_gpus,
+            num_cpus=float(self.config.ray.ocr_worker_num_cpus),
+        )

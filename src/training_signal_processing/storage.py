@@ -98,7 +98,6 @@ class R2ObjectStore(ObjectStore):
         resolved = R2Config(
             config_file=str(config_path),
             bucket=values.get("R2_BUCKET_NAME") or config.bucket,
-            raw_pdf_prefix=config.raw_pdf_prefix,
             output_prefix=config.output_prefix,
             access_key_id=values.get("AWS_ACCESS_KEY_ID", ""),
             secret_access_key=values.get("AWS_SECRET_ACCESS_KEY", ""),
@@ -112,7 +111,6 @@ class R2ObjectStore(ObjectStore):
         resolved = R2Config(
             config_file=config.config_file,
             bucket=os.environ.get("R2_BUCKET") or config.bucket,
-            raw_pdf_prefix=config.raw_pdf_prefix,
             output_prefix=config.output_prefix,
             access_key_id=os.environ.get("R2_ACCESS_KEY_ID", ""),
             secret_access_key=os.environ.get("R2_SECRET_ACCESS_KEY", ""),
