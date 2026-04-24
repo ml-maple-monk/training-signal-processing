@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..core.models import R2Config, SshConfig
+from .reverse_tunnel import TunnelHandle, ensure_reverse_tunnels
 
 if TYPE_CHECKING:
     from ..storage.object_store import R2ObjectStore
@@ -163,6 +164,7 @@ class SubmissionResult:
     transport_details: dict[str, object] = field(default_factory=dict)
     remote_summary: dict[str, object] = field(default_factory=dict)
     launch: LaunchHandle | None = None
+    tunnels: tuple[TunnelHandle, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         payload = {
@@ -174,6 +176,8 @@ class SubmissionResult:
             payload["remote_summary"] = dict(self.remote_summary)
         if self.launch is not None:
             payload["launch"] = self.launch.to_dict()
+        if self.tunnels:
+            payload["tunnels"] = [t.to_dict() for t in self.tunnels]
         return payload
 
     def to_safe_dict(self) -> dict[str, object]:
@@ -207,6 +211,8 @@ class SubmissionResult:
             base["remote_summary"] = dict(self.remote_summary)
         if self.launch is not None:
             base["launch"] = self.launch.to_dict()
+        if self.tunnels:
+            base["tunnels"] = [t.to_dict() for t in self.tunnels]
         return base
 
 
@@ -426,6 +432,12 @@ class RemoteTransport(ABC):
     ) -> LaunchHandle:
         raise NotImplementedError
 
+    def ensure_reverse_tunnels(
+        self, reverse_tunnels: tuple[str, ...]
+    ) -> tuple[TunnelHandle, ...]:
+        """Default: transport has no tunnel concept. SSH overrides this."""
+        return ()
+
 
 class SshRemoteTransport(RemoteTransport):
     def __init__(
@@ -594,6 +606,16 @@ class SshRemoteTransport(RemoteTransport):
         )
         self._run_remote_shell(f"{start_command} {wait_command}", reverse_tunnels=reverse_tunnels)
 
+    def ensure_reverse_tunnels(
+        self, reverse_tunnels: tuple[str, ...]
+    ) -> tuple[TunnelHandle, ...]:
+        """Spawn (or reuse) a persistent `ssh -fN` for each reverse tunnel spec.
+
+        Delegates to `runtime.reverse_tunnel.ensure_reverse_tunnels` which uses
+        ControlMaster sockets for idempotent tunnel management.
+        """
+        return ensure_reverse_tunnels(self.ssh_config, reverse_tunnels)
+
     def build_ssh_target(self) -> str:
         return f"{self.ssh_config.user}@{self.ssh_config.host}"
 
@@ -710,6 +732,13 @@ class SubmissionCoordinator:
             # detached remote launcher fixes.
             if upload_handle is not None:
                 upload_handle.wait()
+            # Spin up persistent reverse tunnels (if any) BEFORE the detached
+            # launch. The launch SSH closes as soon as setsid spawns; without
+            # this, any `-R` tunnel dies with it and the remote wedges on
+            # connect() to 127.0.0.1:<port>.
+            tunnel_handles = self.remote_transport.ensure_reverse_tunnels(
+                prepared_run.invocation.reverse_tunnels
+            )
             launch_handle = self.remote_transport.launch_detached(
                 remote_root=prepared_run.remote_root,
                 spec=prepared_run.invocation,
@@ -719,6 +748,7 @@ class SubmissionCoordinator:
                 mode="launched",
                 prepared_run=prepared_run,
                 transport_details=transport_details,
+                tunnels=tunnel_handles,
                 launch=launch_handle,
             )
         except Exception:
