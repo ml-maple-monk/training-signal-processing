@@ -248,12 +248,14 @@ class StreamingRayExecutor(Executor):
                 progress_reporter=progress_reporter,
                 phase="iter_batches_start",
             )
-            for batch_index, current_batch in enumerate(
+            base_batch_index = run_state.last_committed_batch
+            for batch_offset, current_batch in enumerate(
                 dataset_builder.iter_batches(dataset, batch_size=execution.batch_size),
                 start=1,
             ):
+                batch_index = base_batch_index + batch_offset
                 batch_id = f"batch-{batch_index:05d}"
-                if batch_index == 1:
+                if batch_offset == 1:
                     run_state = self.transition_run_phase(
                         run_state=run_state,
                         resume_ledger=resume_ledger,

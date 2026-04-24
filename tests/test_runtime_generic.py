@@ -171,6 +171,8 @@ class FakeResumeLedger(ResumeLedger):
         artifact_layout: RunArtifactLayout,
         tracking_run_id: str,
     ) -> RunState:
+        if self.run_state is not None and self.run_state.run_id == run_id:
+            return self.run_state
         self.run_state = RunState(
             run_id=run_id,
             status="running",
@@ -401,6 +403,43 @@ def test_streaming_executor_runs_with_fake_pipeline_adapter(capsys) -> None:
     assert "dataset_build_start" in phases
     assert "dataset_build_complete" in phases
     assert "iter_batches_start" in phases
+    assert "first_batch_materialized" in phases
+
+
+def test_streaming_executor_resume_continues_batch_numbering(capsys) -> None:
+    adapter = FakePipelineAdapter()
+    adapter.resume_ledger.run_state = RunState(
+        run_id="fake-run-001",
+        status="running",
+        total_items=2,
+        pending_items=2,
+        success_count=7,
+        failed_count=0,
+        skipped_count=0,
+        last_committed_batch=7,
+        started_at="2026-04-22T00:00:00Z",
+        updated_at="2026-04-22T00:00:00Z",
+        source_root_key="source/items",
+        output_root_key="output/items/fake-run-001",
+        tracking_run_id="disabled:fake-run-001",
+        current_phase="resume_state_loaded",
+        last_phase_at="2026-04-22T00:00:00Z",
+    )
+
+    summary = StreamingRayExecutor(adapter).run()
+    captured = capsys.readouterr()
+
+    assert summary["status"] == "success"
+    assert adapter.resume_ledger.run_state is not None
+    assert adapter.resume_ledger.run_state.last_committed_batch == 9
+    assert adapter.resume_ledger.run_state.success_count == 9
+    assert "[batch:start] batch_id=batch-00008" in captured.out
+    assert "[batch:commit] batch_id=batch-00009" in captured.out
+    phases = [
+        state.current_phase
+        for state in adapter.resume_ledger.write_history
+        if state.current_phase
+    ]
     assert "first_batch_materialized" in phases
 
 
