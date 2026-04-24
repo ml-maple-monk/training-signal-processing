@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 from abc import ABC, abstractmethod
@@ -14,6 +15,13 @@ if TYPE_CHECKING:
     from ..storage.object_store import R2ObjectStore
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
+
+# Allowlist for run_id values used in remote filesystem paths. Conservative: only
+# alphanumeric, underscore, hyphen, and period. The canonical generator
+# `core.utils.utc_timestamp()` produces values like "20260423T195035Z" which
+# match this pattern; anything that doesn't should be rejected loudly rather
+# than quietly quoted, because the run_id is used as a path segment.
+_RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 
 @dataclass(frozen=True)
@@ -79,6 +87,31 @@ class LocalAsyncUploadSpec:
 
 
 @dataclass(frozen=True)
+class LaunchHandle:
+    """Identifiers for a detached remote job so it can later be found, tailed, or killed.
+
+    The pgid is written by the `setsid` session leader itself (`echo $$`) so it
+    always matches the process-group leader — killing via `kill -TERM -<pgid>`
+    signals the whole group (driver + workers + uploader).
+    """
+
+    run_id: str
+    remote_jobs_root: str
+    log_path: str
+    pgid_path: str
+    launcher_script_path: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "run_id": self.run_id,
+            "remote_jobs_root": self.remote_jobs_root,
+            "log_path": self.log_path,
+            "pgid_path": self.pgid_path,
+            "launcher_script_path": self.launcher_script_path,
+        }
+
+
+@dataclass(frozen=True)
 class PreparedRun:
     run_id: str
     remote_root: str
@@ -129,6 +162,7 @@ class SubmissionResult:
     prepared_run: PreparedRun
     transport_details: dict[str, object] = field(default_factory=dict)
     remote_summary: dict[str, object] = field(default_factory=dict)
+    launch: LaunchHandle | None = None
 
     def to_dict(self) -> dict[str, object]:
         payload = {
@@ -138,6 +172,8 @@ class SubmissionResult:
         }
         if self.remote_summary:
             payload["remote_summary"] = dict(self.remote_summary)
+        if self.launch is not None:
+            payload["launch"] = self.launch.to_dict()
         return payload
 
     def to_safe_dict(self) -> dict[str, object]:
@@ -162,18 +198,16 @@ class SubmissionResult:
         }
         if self.prepared_run.invocation.reverse_tunnels:
             plan_payload["reverse_tunnels"] = list(self.prepared_run.invocation.reverse_tunnels)
-        if self.remote_summary:
-            return {
-                "mode": self.mode,
-                "artifacts": artifacts_payload,
-                "plan": plan_payload,
-                "remote_summary": dict(self.remote_summary),
-            }
-        return {
+        base: dict[str, object] = {
             "mode": self.mode,
             "artifacts": artifacts_payload,
             "plan": plan_payload,
         }
+        if self.remote_summary:
+            base["remote_summary"] = dict(self.remote_summary)
+        if self.launch is not None:
+            base["launch"] = self.launch.to_dict()
+        return base
 
 
 class CommandRunner(ABC):
@@ -382,6 +416,16 @@ class RemoteTransport(ABC):
     def execute(self, *, remote_root: str, spec: RemoteInvocationSpec) -> CommandOutput:
         raise NotImplementedError
 
+    @abstractmethod
+    def launch_detached(
+        self,
+        *,
+        remote_root: str,
+        spec: RemoteInvocationSpec,
+        run_id: str,
+    ) -> LaunchHandle:
+        raise NotImplementedError
+
 
 class SshRemoteTransport(RemoteTransport):
     def __init__(
@@ -430,6 +474,125 @@ class SshRemoteTransport(RemoteTransport):
             ),
             reverse_tunnels=spec.reverse_tunnels,
         )
+
+    REMOTE_JOBS_ROOT = "/root/ocr-jobs"
+    HEREDOC_TERMINATOR = "__OCR_LAUNCHER_EOF__"
+    PGID_WAIT_ATTEMPTS = 20
+    PGID_WAIT_SLEEP_SECONDS = "0.25"
+
+    def launch_detached(
+        self,
+        *,
+        remote_root: str,
+        spec: RemoteInvocationSpec,
+        run_id: str,
+    ) -> LaunchHandle:
+        """Launch `spec.command` in its own process group on the remote host.
+
+        Survival of SSH disconnect depends on two things being right:
+            - The child must not inherit a controlling TTY (done by `setsid`).
+            - We must record the new *process group* ID (not `$!`), so a later
+              `kill -TERM -<pgid>` can signal the whole tree (Ray driver,
+              workers, uploader). The session leader writes its own `$$`.
+
+        To avoid quote-in-quote hazards, `spec.command` is not inlined into a
+        `bash -c '...'` — it is written verbatim into a heredoc'd launcher
+        script, which `setsid` then exec's.
+        """
+        if not _RUN_ID_PATTERN.fullmatch(run_id or ""):
+            raise ValueError(
+                f"run_id must match {_RUN_ID_PATTERN.pattern}, got: {run_id!r}"
+            )
+        if not spec.command.strip():
+            raise ValueError("Remote command must be explicit and non-empty.")
+
+        jobs_root = f"{self.REMOTE_JOBS_ROOT}/{run_id}"
+        log_path = f"{jobs_root}/job.log"
+        pgid_path = f"{jobs_root}/job.pgid"
+        launcher_path = f"{jobs_root}/launch.sh"
+
+        self._write_launcher_script(
+            launcher_path=launcher_path,
+            jobs_root=jobs_root,
+            remote_root=remote_root,
+            env=spec.env,
+            command=spec.command,
+        )
+        self._start_launcher_detached(
+            launcher_path=launcher_path,
+            log_path=log_path,
+            pgid_path=pgid_path,
+            reverse_tunnels=spec.reverse_tunnels,
+        )
+
+        return LaunchHandle(
+            run_id=run_id,
+            remote_jobs_root=jobs_root,
+            log_path=log_path,
+            pgid_path=pgid_path,
+            launcher_script_path=launcher_path,
+        )
+
+    def _write_launcher_script(
+        self,
+        *,
+        launcher_path: str,
+        jobs_root: str,
+        remote_root: str,
+        env: dict[str, str],
+        command: str,
+    ) -> None:
+        env_exports = "".join(
+            f"export {name}={shlex.quote(value)}\n"
+            for name, value in sorted(env.items())
+        )
+        script_body = (
+            "#!/bin/sh\n"
+            "set -e\n"
+            f"cd {shlex.quote(remote_root)}\n"
+            f"{env_exports}"
+            f"exec {command}\n"
+        )
+        terminator = self.HEREDOC_TERMINATOR
+        if terminator in script_body:
+            raise RuntimeError(
+                f"Heredoc terminator {terminator!r} appeared in launcher script body; "
+                "refusing to write to avoid heredoc injection."
+            )
+        write_command = (
+            f"mkdir -p {shlex.quote(jobs_root)} && "
+            f"cat > {shlex.quote(launcher_path)} <<'{terminator}'\n"
+            f"{script_body}"
+            f"{terminator}\n"
+            f"chmod +x {shlex.quote(launcher_path)}"
+        )
+        self._run_remote_shell(write_command)
+
+    def _start_launcher_detached(
+        self,
+        *,
+        launcher_path: str,
+        log_path: str,
+        pgid_path: str,
+        reverse_tunnels: tuple[str, ...],
+    ) -> None:
+        inner = (
+            f"exec >{shlex.quote(log_path)} 2>&1 </dev/null; "
+            f"echo $$ > {shlex.quote(pgid_path)}; "
+            f"exec sh {shlex.quote(launcher_path)}"
+        )
+        start_command = (
+            f"setsid sh -c {shlex.quote(inner)} </dev/null >/dev/null 2>&1 &"
+        )
+        wait_command = (
+            f"i=0; while [ $i -lt {self.PGID_WAIT_ATTEMPTS} ]; do "
+            f"  if [ -s {shlex.quote(pgid_path)} ]; then exit 0; fi; "
+            f"  sleep {self.PGID_WAIT_SLEEP_SECONDS}; i=$((i+1)); "
+            f"done; "
+            f"echo 'pgid file not written within {self.PGID_WAIT_ATTEMPTS} attempts' >&2; "
+            f"exit 1"
+        )
+        self._run_remote_shell(f"{start_command} {wait_command}", reverse_tunnels=reverse_tunnels)
 
     def build_ssh_target(self) -> str:
         return f"{self.ssh_config.user}@{self.ssh_config.host}"
@@ -540,17 +703,23 @@ class SubmissionCoordinator:
                     ),
                     env=prepared_run.async_upload.env,
                 )
-            remote_output = self.remote_transport.execute(
-                remote_root=prepared_run.remote_root,
-                spec=prepared_run.invocation,
-            )
+            # Wait for the local input upload before launching the remote job, so
+            # the detached remote never races ahead of its inputs. This still
+            # blocks the local CLI for the upload duration, but that's a local
+            # process — it is not subject to the SSH-disconnect kill that the
+            # detached remote launcher fixes.
             if upload_handle is not None:
                 upload_handle.wait()
+            launch_handle = self.remote_transport.launch_detached(
+                remote_root=prepared_run.remote_root,
+                spec=prepared_run.invocation,
+                run_id=prepared_run.run_id,
+            )
             return SubmissionResult(
-                mode="executed",
+                mode="launched",
                 prepared_run=prepared_run,
                 transport_details=transport_details,
-                remote_summary=self.adapter.parse_remote_summary(remote_output.stdout),
+                launch=launch_handle,
             )
         except Exception:
             if upload_handle is not None and upload_handle.poll() is None:

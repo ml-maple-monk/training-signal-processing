@@ -17,6 +17,7 @@ from training_signal_processing.runtime.submission import (
     AsyncCommandRunner,
     BootstrapSpec,
     CommandOutput,
+    LaunchHandle,
     LocalAsyncUploadSpec,
     PreparedRun,
     RemoteInvocationSpec,
@@ -101,8 +102,8 @@ class FakeAsyncRunner(AsyncCommandRunner):
 
 
 class FakeRemoteTransport(RemoteTransport):
-    def __init__(self, *, fail_execute: bool = False) -> None:
-        self.fail_execute = fail_execute
+    def __init__(self, *, fail_launch: bool = False) -> None:
+        self.fail_launch = fail_launch
         self.events: list[str] = []
 
     def describe(self) -> dict[str, object]:
@@ -117,9 +118,25 @@ class FakeRemoteTransport(RemoteTransport):
 
     def execute(self, *, remote_root: str, spec: RemoteInvocationSpec) -> CommandOutput:
         self.events.append("execute")
-        if self.fail_execute:
-            raise RuntimeError("remote execute failed")
         return CommandOutput(stdout='{"status":"success"}', stderr="")
+
+    def launch_detached(
+        self,
+        *,
+        remote_root: str,
+        spec: RemoteInvocationSpec,
+        run_id: str,
+    ) -> LaunchHandle:
+        self.events.append("launch_detached")
+        if self.fail_launch:
+            raise RuntimeError("remote launch failed")
+        return LaunchHandle(
+            run_id=run_id,
+            remote_jobs_root=f"/root/ocr-jobs/{run_id}",
+            log_path=f"/root/ocr-jobs/{run_id}/job.log",
+            pgid_path=f"/root/ocr-jobs/{run_id}/job.pgid",
+            launcher_script_path=f"/root/ocr-jobs/{run_id}/launch.sh",
+        )
 
 
 class FakeSubmissionAdapter(SubmissionAdapter):
@@ -353,14 +370,17 @@ def test_submission_coordinator_waits_for_async_upload_success(tmp_path: Path) -
         async_command_runner=async_runner,
     ).submit(dry_run=False)
 
-    assert result.mode == "executed"
-    assert transport.events == ["sync", "bootstrap", "execute"]
+    assert result.mode == "launched"
+    assert result.launch is not None and result.launch.run_id == "run-001"
+    # Ordering changed: the local input upload must complete BEFORE the remote
+    # launch, so the detached remote never races ahead of its inputs.
+    assert transport.events == ["sync", "bootstrap", "launch_detached"]
     assert async_runner.started_commands == [["rclone", "copy"]]
     assert async_runner.handle.wait_called is True
     assert cleanup_path.exists() is False
 
 
-def test_submission_coordinator_terminates_async_upload_on_remote_failure(tmp_path: Path) -> None:
+def test_submission_coordinator_cleans_up_when_launch_fails(tmp_path: Path) -> None:
     cleanup_path = tmp_path / "upload-files.txt"
     cleanup_path.write_text("alpha.pdf\n", encoding="utf-8")
     prepared_run = PreparedRun(
@@ -375,9 +395,9 @@ def test_submission_coordinator_terminates_async_upload_on_remote_failure(tmp_pa
         ),
     )
     async_runner = FakeAsyncRunner()
-    transport = FakeRemoteTransport(fail_execute=True)
+    transport = FakeRemoteTransport(fail_launch=True)
 
-    with pytest.raises(RuntimeError, match="remote execute failed"):
+    with pytest.raises(RuntimeError, match="remote launch failed"):
         SubmissionCoordinator(
             adapter=FakeSubmissionAdapter(prepared_run),
             artifact_store=FakeArtifactStore(),
@@ -385,7 +405,11 @@ def test_submission_coordinator_terminates_async_upload_on_remote_failure(tmp_pa
             async_command_runner=async_runner,
         ).submit(dry_run=False)
 
-    assert async_runner.handle.terminate_called is True
+    # Upload finished (wait returned 0) before launch ran, so there is nothing
+    # running that needs to be terminated.
+    assert async_runner.handle.wait_called is True
+    assert async_runner.handle.terminate_called is False
+    # `finally` block still runs cleanup_paths.
     assert cleanup_path.exists() is False
 
 
