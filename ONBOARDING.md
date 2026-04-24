@@ -63,8 +63,12 @@ Set these up once; you won't touch them again.
   ```
   uv run mlflow server --host 127.0.0.1 --port 5000
   ```
-  This writes an `mlflow.db` in the CWD. If you skip it, runs
-  still succeed — progress streams to stdout via `TqdmProgressReporter`.
+  This writes an `mlflow.db` in the CWD. If you skip it, runs still
+  succeed, but progress no longer streams to your local terminal
+  (PR #1 made the launcher fire-and-forget); instead it is written to
+  `/root/ocr-jobs/<run_id>/job.log` on the pod. `tail -F` that file
+  over SSH to watch live. See §3 *Running-job runbook* for the
+  one-liners.
 
 ### Credentials
 
@@ -251,10 +255,25 @@ override `ssh.host` / `ssh.port` in the recipe.
       --group model --frozen`.
    4. Local: rclone starts the parallel PDF upload to R2 in
       background.
-   5. Remote: `uv run python -m ...main ocr-remote-job …` executes,
-      loops through the ops, writes per-batch manifests + final
-      markdown bytes to R2.
-   6. Local: CLI prints the final `ExecutorRunSummary` as JSON.
+   5. Local: `ensure_reverse_tunnels` spawns a persistent
+      `ssh -fN -o ControlMaster=yes` for every declared `-R` tunnel
+      (e.g. MLflow at `15000:127.0.0.1:5000`). The ControlMaster
+      socket outlives the launcher SSH so the detached remote can
+      keep using it.
+   6. Local: `launch_detached` SSHes to the pod, writes a
+      `launch.sh` under `/root/ocr-jobs/<run_id>/`, and spawns it
+      under `setsid`. The session leader records its own pgid in
+      `.../job.pgid` before exec'ing the launcher. Remote stdout
+      goes to `.../job.log`. The local CLI then prints a
+      `LaunchHandle` + `TunnelHandle` JSON and exits. **Exit code
+      0 means *launched successfully*, not *run complete*** — check
+      completion by reading `run_state.json` from R2 or tailing the
+      remote log.
+   7. Remote: `uv run python -m ...main ocr-remote-job …` runs
+      under PID 1 (reparented to init), loops through the ops, and
+      writes per-batch manifests + final markdown bytes to R2.
+      Because it is detached, closing the terminal or losing the
+      SSH link does not affect it.
 4. **Watch progress.** If you started local MLflow in §0, open
    `http://127.0.0.1:5000`. Watch tags `status` (transitions
    `running` → `success` / `partial` / `failed`) and
@@ -265,10 +284,13 @@ override `ssh.host` / `ssh.port` in the recipe.
    Checks](README.md) for the `MlflowClient` snippet that tails the
    latest runs from the CLI.
 
-   **If you skipped MLflow**, progress still streams to stdout via
-   `TqdmProgressReporter` — look for bracketed phase markers on
-   stderr: `[run]`, `[phase:…]`, `[batch:start]`, `[op:finish]`,
-   `[batch:commit]`, `[run:finish]`.
+   **If you skipped MLflow**, progress markers no longer appear on
+   your local terminal — the launcher is fire-and-forget since
+   PR #1. They are written to `/root/ocr-jobs/<run_id>/job.log` on
+   the pod instead. Watch them with
+   `ssh <pod> 'tail -F /root/ocr-jobs/<run_id>/job.log'` — look for
+   `[run]`, `[phase:…]`, `[batch:start]`, `[op:finish]`,
+   `[batch:commit]`, `[run:finish]` just as before.
 5. **Resume an interrupted run.** If the executor died mid-batch,
    pass the `run_id` (a UTC timestamp like `20260423T132754Z`) that
    was printed in the original run's JSON output:
@@ -280,6 +302,19 @@ override `ssh.host` / `ssh.port` in the recipe.
    The `OcrResumeLedger.load_completed_item_keys` reads all prior
    batch manifests and feeds them to `SkipExistingDocumentsOp`, so
    already-successful PDFs are filtered out without being reprocessed.
+
+   > ⚠ **Double-launch hazard.** `resume --run-id X` does **not**
+   > currently detect a still-live run on the pod; it will blindly
+   > re-launch and overwrite `/root/ocr-jobs/X/job.pgid`, orphaning
+   > the old session's Ray cluster. Before resuming, verify the old
+   > run is stopped:
+   > ```
+   > ssh <pod> 'f=/root/ocr-jobs/X/job.pgid; test -f $f && kill -0 -$(cat $f) 2>/dev/null && echo ALIVE || echo NOT_RUNNING'
+   > ```
+   > Only resume if this prints `NOT_RUNNING`. The `test -f` guard
+   > matters for first-ever resumes where the pgid file does not yet
+   > exist. A pgid-aware resume that reconciles stale `running`
+   > states lands in a follow-up PR.
 
 ### §1.4 Experiment without touching code
 
@@ -415,6 +450,57 @@ Only errors the code actually raises, with the fix for each.
   `ops:` entry.
   *Fix:* rename the file to drop the underscore prefix, or correct
   the `op_name` typo.
+
+<!-- TRANSITIONAL: remove this subsection when ocr-remote CLI lands in PR #2b. Grep anchor: OPERATOR_RUNBOOK_MANUAL_SSH -->
+### §3.X Running-job runbook (manual SSH until `ocr-remote` CLI lands)  <!-- OPERATOR_RUNBOOK_MANUAL_SSH -->
+
+Because PR #1 made the launcher fire-and-forget, the local CLI no
+longer tails the remote job. Until the `ocr-remote status / tail /
+stop / wait` CLI ships (PR #2b), use these SSH one-liners against
+the pod running the job. All commands assume `infra/current-machine`
+is populated and `<run_id>` is the UTC timestamp id.
+
+**Watch live:**
+```
+ssh <pod> 'tail -F /root/ocr-jobs/<run_id>/job.log'
+```
+
+**Status probe (distinguishes ALIVE from NOT_RUNNING and from
+"never launched"):**
+```
+ssh <pod> 'f=/root/ocr-jobs/<run_id>/job.pgid; test -f $f && kill -0 -$(cat $f) 2>/dev/null && echo ALIVE || echo NOT_RUNNING'
+```
+
+**Stop cleanly** — SIGTERM the whole process group; SIGKILL on
+timeout. Because `setsid` made the session leader's pid equal to the
+pgid, the negative-target kill signals Ray driver + workers + async
+uploader together:
+```
+ssh <pod> 'p=$(cat /root/ocr-jobs/<run_id>/job.pgid); kill -TERM -$p; sleep 10; kill -KILL -$p 2>/dev/null || true'
+```
+
+**Tunnel troubleshooting.** ControlMaster sockets for the
+framework-managed reverse tunnels live at
+`~/.cache/ocr-remote-launcher/tunnels/t-<hash>.sock` on the local
+machine.
+
+- Check a tunnel is alive:
+  ```
+  ssh -S ~/.cache/ocr-remote-launcher/tunnels/t-<hash>.sock -O check <ssh_target>
+  ```
+  Expect `Master running (pid=…)`.
+- Manual teardown if the socket is stale:
+  ```
+  ssh -S <sock> -O exit <ssh_target>
+  rm <sock>
+  ```
+- `run` / `resume` re-creates the tunnel automatically on the next
+  launch via `ensure_reverse_tunnels`; you should not need to start
+  one by hand.
+
+> When PR #2b lands, delete this subsection and replace with a
+> pointer to the `ocr-remote` CLI reference.
+<!-- /TRANSITIONAL -->
 
 ---
 
