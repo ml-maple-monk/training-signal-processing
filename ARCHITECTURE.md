@@ -163,12 +163,17 @@ layers stay pipeline-agnostic.
 
 | ABC | File:line | Methods (abstract) |
 |-----|-----------|--------------------|
-| `SubmissionAdapter` | [runtime/submission.py:478](src/training_signal_processing/runtime/submission.py#L478) | `prepare_new_run`, `prepare_resume_run`, `parse_remote_summary` |
+| `SubmissionAdapter` | [runtime/submission.py:478](src/training_signal_processing/runtime/submission.py#L478) | `prepare_new_run`, `prepare_resume_run`, `parse_remote_summary` † |
 | `PipelineRuntimeAdapter` | [runtime/executor.py:49](src/training_signal_processing/runtime/executor.py#L49) | `get_run_bindings`, `get_execution_config`, `get_tracking_context`, `get_op_configs`, `get_artifact_layout`, `load_input_rows`, `build_runtime_context`, `build_op_registry`, `build_exporter`, `build_resume_ledger` |
 | `ResumeLedger` | [runtime/resume.py:11](src/training_signal_processing/runtime/resume.py#L11) | `find_latest_partial_run`, `load_run_state`, `load_completed_item_keys`, `initialize_run_state`, `commit_batch`, `write_run_state`, `mark_run_finished`, `mark_run_failed` |
 | `Exporter` | [runtime/exporter.py:11](src/training_signal_processing/runtime/exporter.py#L11) | `export_batch`, `finalize_run` |
 | `OpRegistry` | [ops/registry.py:50](src/training_signal_processing/ops/registry.py#L50) (template `resolve_pipeline`) | `resolve_pipeline(configs) -> ResolvedOpPipeline` |
 | `Op` (+ `MapperOp` / `FilterOp` / `PipelineOp`) | [ops/base.py:17](src/training_signal_processing/ops/base.py#L17), [:82](src/training_signal_processing/ops/base.py#L82), [:90](src/training_signal_processing/ops/base.py#L90), [:101](src/training_signal_processing/ops/base.py#L101) | `process_batch(Batch) -> Batch` (and one of: `op_name`, `op_stage`) |
+
+> † `parse_remote_summary` is not invoked by the detached-launch path in
+> PR #1 (OCR). Blocking `execute`-style adapters (`example_echo`,
+> `tokenizer`, `youtube_asr`) still call it to parse the remote JSON
+> summary from stdout. See §7 *Detached lifecycle* for how OCR moved off it.
 
 `PipelineRuntimeAdapter` lines [94-107](src/training_signal_processing/runtime/executor.py#L94-L107)
 are **default-method extension hooks** rather than pure abstractions:
@@ -185,8 +190,8 @@ These are provided by the runtime; pipelines consume them as-is.
 | Class | File:line | Role |
 |-------|-----------|------|
 | `R2ArtifactStore` | [runtime/submission.py:316](src/training_signal_processing/runtime/submission.py#L316) | `ArtifactStore` over R2/S3; `build_remote_env` at [:354](src/training_signal_processing/runtime/submission.py#L354) emits R2 + AWS-compat + MLflow S3 endpoint vars |
-| `SshRemoteTransport` | [runtime/submission.py:386](src/training_signal_processing/runtime/submission.py#L386) | `RemoteTransport` over rsync + ssh; supports `-R` reverse tunnels |
-| `SubmissionCoordinator` | [runtime/submission.py:492](src/training_signal_processing/runtime/submission.py#L492) | Orchestrates `prepare → sync → bootstrap → execute (+ async upload)` |
+| `SshRemoteTransport` | [runtime/submission.py:386](src/training_signal_processing/runtime/submission.py#L386) | `RemoteTransport` over rsync + ssh; `launch_detached` spawns the remote job under `setsid` and records its pgid; `ensure_reverse_tunnels` opens a persistent `ssh -fN -o ControlMaster=yes` per declared `-R` tunnel before launch so the tunnel outlives the launcher SSH (see [runtime/reverse_tunnel.py](src/training_signal_processing/runtime/reverse_tunnel.py)) |
+| `SubmissionCoordinator` | [runtime/submission.py:492](src/training_signal_processing/runtime/submission.py#L492) | Orchestrates `prepare → sync → bootstrap → (optional local upload wait) → ensure_reverse_tunnels → launch_detached → return LaunchHandle` |
 | `StreamingRayExecutor` | [runtime/executor.py:114](src/training_signal_processing/runtime/executor.py#L114) | The `Executor` for batch GPU pipelines; per-batch loop |
 | `RegisteredOpRegistry` | [ops/registry.py:63](src/training_signal_processing/ops/registry.py#L63) | The concrete `OpRegistry`; triggers the import-sweep on module load |
 | `RayDatasetBuilder` / `ConfiguredRayDatasetBuilder` | [runtime/dataset.py:57](src/training_signal_processing/runtime/dataset.py#L57), [:132](src/training_signal_processing/runtime/dataset.py#L132) | `DatasetBuilder` over Ray Data; `Configured` re-partitions to `target_num_blocks` |
@@ -368,11 +373,38 @@ The flow on the local side is split between three interfaces:
   and optionally `async_upload` (a local rclone command run in
   parallel with the remote execution).
 - `RemoteTransport` (`SshRemoteTransport`) implements `sync`,
-  `bootstrap`, `execute` over SSH + rsync.
+  `bootstrap`, `execute`, `launch_detached`, and `ensure_reverse_tunnels`
+  over SSH + rsync.
 - `SubmissionCoordinator.submit` ([runtime/submission.py:492](src/training_signal_processing/runtime/submission.py#L492))
   orchestrates them: prepare → sync code → bootstrap → start async
-  upload (if any) → execute remote → cleanup local upload paths →
-  parse the remote stdout via `adapter.parse_remote_summary`.
+  upload (if any) → wait for upload → ensure_reverse_tunnels →
+  launch_detached → return LaunchHandle. The OCR path no longer parses
+  remote stdout (no `adapter.parse_remote_summary` call); the remote
+  writes its own `run_state.json` to R2 instead.
+
+### 7.1 Detached lifecycle (PR #1)
+
+`submit()` returns immediately once `setsid` writes `job.pgid` on the
+pod — it is **fire-and-forget**. The remote OCR job runs in its own
+process group under PID 1 (init), so SSH disconnects cannot kill it.
+Remote stdout/stderr live at `/root/ocr-jobs/<run_id>/job.log`; the
+local CLI prints only the `LaunchHandle` + `TunnelHandle` JSON and
+exits. **Exit code 0 means "launched successfully", not "run
+complete".** Completion must be inferred by reading `run_state.json`
+from R2 or by tailing the remote log.
+
+### 7.2 Reverse tunnel lifecycle (PR #2a)
+
+`ensure_reverse_tunnels()` runs before `launch_detached` and spawns a
+persistent `ssh -fN -o ControlMaster=yes` per declared `-R` tunnel
+spec. The ControlMaster socket is stored at
+`~/.cache/ocr-remote-launcher/tunnels/t-<hash>.sock`, hashed by host +
+port + tunnel spec so the same tunnel is always deterministically
+addressable. The call is idempotent: if `ssh -S <sock> -O check`
+answers OK the existing tunnel is reused; otherwise a stale socket is
+unlinked and a fresh `ssh -fN` is spawned. Manual teardown is
+`ssh -S <sock> -O exit <ssh_target>`. See ONBOARDING §3 *Running-job
+runbook* for the operator-facing checks.
 
 OCR-side helpers worth pointing at:
 
@@ -454,7 +486,9 @@ StreamingRayExecutor.run()  (runtime/executor.py:114)
         |    resume_ledger.mark_run_finished(run_state)
         |    exporter.finalize_run(run_state)
         |    if coordinator: coordinator.drain()              # final drain
-        |    return ExecutorRunSummary.to_dict()              # printed by CLI
+        |    return ExecutorRunSummary.to_dict()              # written to run_state.json on R2;
+        |                                                     # local CLI has already exited
+        |                                                     # with a LaunchHandle (see §7.1)
         |
         +--- except Exception:
         |      if coordinator: coordinator.abort()            # cancel in-flight
@@ -660,18 +694,16 @@ to the final markdown writes. Step numbers below match the diagram.
                                                                 |
                                                                 v
 [4] SubmissionCoordinator.submit                 (submission.py:492)
-                ┌─────────────┬──────────────┬──────────────┐
-                │             │              │              │
-                v             v              v              v
-          rsync -az      bootstrap        rclone parallel  ssh execute:
-          sync_paths     uv sync          upload of PDFs   uv run python
-                                                            -m main \
-                                                            ocr-remote-job \
-                                                            --run-id ... \
-                                                            --config-object-key K \
-                                                            --input-manifest-key M \
-                                                            --uploaded-items N
-                                                            (-R 15000:127.0.0.1:5000)
+                ┌───────────┬──────────┬──────────┬────────────┬────────────────┐
+                │           │          │          │            │                │
+                v           v          v          v            v                v
+          rsync -az    bootstrap  rclone      ensure_      launch_detached   return
+          sync_paths   uv sync    parallel    reverse_    (setsid sh -c …  LaunchHandle
+                                  upload of   tunnels      echo $$>pgid;   (local CLI
+                                  PDFs        (ssh -fN -M  exec launch.sh   exits here;
+                                  (awaited    -R 15000:    & — survives    remote keeps
+                                   before     127.0.0.1:   SSH disconnect)  running under
+                                   launch)    5000)                         setsid)
                                                                 |
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~ network boundary ~~~~~~~~~~~~~~~~~~~|~~~~~~~~~~
                                                                 v
@@ -707,9 +739,12 @@ to the final markdown writes. Step numbers below match the diagram.
                                                                 |
                               ... loop until input exhausted ...
                                                                 v
-[9] mark_run_finished -> finalize_run -> CLI prints ExecutorRunSummary
+[9] mark_run_finished -> finalize_run -> remote writes run_state.json to R2
         status is one of: success | partial | failed
         run.json carries the final RunState
+        (local CLI already exited with a LaunchHandle at step [4];
+         operators inspect run_state.json or tail /root/ocr-jobs/<run_id>/job.log
+         to see completion — see ONBOARDING §3 *Running-job runbook*)
 ```
 
 **Worth knowing.** Steps 5-8 are framework-generic; they are the same
@@ -816,8 +851,8 @@ youtube_asr reuse `remote_ocr`'s deps. `[tool.uv.sources]` pins
 - **rsync** — CLI for code/lockfile sync; `SshRemoteTransport.sync`
   invokes it under SSH.
 - **Marker** — `marker-pdf`; the OCR engine OCR'd by `marker_ocr`.
-- **MLflow** — Experiment tracker; remote process posts to operator's
-  local MLflow server through an SSH `-R` reverse tunnel.
+- **MLflow** — Experiment tracker; MLflow metrics flow over a
+  persistent `-R` reverse tunnel (see §7.2 *Reverse tunnel lifecycle*).
 - **vLLM** — LLM serving runtime used by `Qwen3AsrVllmOp` for batched
   inference.
 - **dstack** — Alternate provisioning path under `infra/dstack/`.
