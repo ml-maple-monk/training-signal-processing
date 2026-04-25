@@ -3,12 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
 import sys
 from abc import ABC, abstractmethod
 
-from ..core.models import BatchCommit, ExecutionLogEvent, RunState, RuntimeTrackingContext
 from ..ops.base import Op
+from .models import BatchCommit, ExecutionLogEvent, RunState, RuntimeTrackingContext
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
 
@@ -90,9 +89,18 @@ class MlflowExecutionLogger(StructuredExecutionLogger):
         import mlflow
         from mlflow.tracking import MlflowClient
 
-        tracking_uri = os.environ.get("MLFLOW_TRACKING_URI") or self.tracking.tracking_uri
+        tracking_uri = self.resolve_tracking_uri()
         mlflow.set_tracking_uri(tracking_uri)
         return MlflowClient(tracking_uri=tracking_uri)
+
+    def resolve_tracking_uri(self) -> str:
+        tracking_uri = self.tracking.tracking_uri.strip()
+        if not tracking_uri:
+            raise ValueError(
+                "mlflow.tracking_uri is required when mlflow.enabled=true; "
+                "reverse-tunnel MLflow was removed."
+            )
+        return tracking_uri
 
 
 class Tracer(ABC):
@@ -473,7 +481,7 @@ class MlflowProgressTracker(ProgressTrackerActor):
     def create_mlflow_run_id(self) -> str:
         if not self.mlflow_enabled:
             return f"disabled:{self.pipeline_run_id}"
-        tracking_uri = os.environ.get("MLFLOW_TRACKING_URI") or self.tracking.tracking_uri
+        tracking_uri = self.resolve_tracking_uri()
         import mlflow
 
         mlflow.set_tracking_uri(tracking_uri)
@@ -485,6 +493,15 @@ class MlflowProgressTracker(ProgressTrackerActor):
         import mlflow
 
         return mlflow
+
+    def resolve_tracking_uri(self) -> str:
+        tracking_uri = self.tracking.tracking_uri.strip()
+        if not tracking_uri:
+            raise ValueError(
+                "mlflow.tracking_uri is required when mlflow.enabled=true; "
+                "reverse-tunnel MLflow was removed."
+            )
+        return tracking_uri
 
 
 def resolve_log_level(level: str) -> int:
@@ -499,3 +516,21 @@ def resolve_log_level(level: str) -> int:
         return mapping[level.upper()]
     except KeyError as exc:
         raise ValueError(f"Unsupported log level: {level}") from exc
+
+
+__all__ = [
+    "ExecutionLogger",
+    "MlflowExecutionLogger",
+    "MlflowProgressTracker",
+    "Monitor",
+    "NullProgressReporter",
+    "ProgressReporter",
+    "ProgressTracker",
+    "ProgressTrackerActor",
+    "StructuredExecutionLogger",
+    "StructuredMonitor",
+    "StructuredTracer",
+    "Tracer",
+    "TqdmProgressReporter",
+    "resolve_log_level",
+]

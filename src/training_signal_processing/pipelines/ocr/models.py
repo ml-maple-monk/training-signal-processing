@@ -1,28 +1,36 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from hashlib import sha256
+from pathlib import Path
 from typing import Any
 
 from ...core.models import (
-    AsyncUploadConfig,
     MlflowConfig,
     ObservabilityConfig,
     OpConfig,
     R2Config,
+    RayConfig,
     RayTransformResources,
     RemoteRuntimeConfig,
     SshConfig,
 )
+from ...core.utils import join_s3_key
+
+
+def build_flat_markdown_name(relative_path: str) -> str:
+    source_name = Path(relative_path).with_suffix(".md").name
+    path_digest = sha256(relative_path.encode("utf-8")).hexdigest()[:16]
+    return f"{path_digest}-{source_name}"
+
+
+def build_markdown_r2_key(output_root_key: str, relative_path: str) -> str:
+    return join_s3_key(output_root_key, f"markdown/{build_flat_markdown_name(relative_path)}")
 
 
 @dataclass
-class OcrRayConfig:
-    executor_type: str
-    batch_size: int
-    concurrency: int
-    target_num_blocks: int
+class OcrRayConfig(RayConfig):
     marker_ocr_resources: RayTransformResources
-    async_upload: AsyncUploadConfig | None = None
 
 
 @dataclass

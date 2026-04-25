@@ -1,20 +1,18 @@
 from __future__ import annotations
 
-import os
-
+from ...core.checkpoint import ResumeLedger
+from ...core.execution import PipelineRuntimeAdapter
+from ...core.exporter import Exporter
 from ...core.models import (
     OpRuntimeContext,
     RunArtifactLayout,
     RuntimeRunBindings,
     RuntimeTrackingContext,
 )
+from ...core.observability import ExecutionLogger
+from ...core.storage import R2ObjectStore
 from ...core.utils import join_s3_key
 from ...ops.registry import OpRegistry, RegisteredOpRegistry
-from ...runtime.executor import PipelineRuntimeAdapter
-from ...runtime.exporter import Exporter
-from ...runtime.observability import ExecutionLogger
-from ...runtime.resume import ResumeLedger
-from ...storage.object_store import R2ObjectStore
 from .exporter import YoutubeTranscriptExporter
 from .models import RecipeConfig
 from .resume import YoutubeAsrResumeLedger
@@ -41,7 +39,7 @@ class YoutubeAsrPipelineRuntimeAdapter(PipelineRuntimeAdapter):
     def get_tracking_context(self) -> RuntimeTrackingContext:
         return RuntimeTrackingContext(
             enabled=self.config.mlflow.enabled,
-            tracking_uri=os.environ.get("MLFLOW_TRACKING_URI", ""),
+            tracking_uri=self.config.mlflow.tracking_uri,
             experiment_name=self.config.mlflow.experiment_name,
             run_name=self.config.run_name,
             executor_type=self.config.ray.executor_type,
@@ -89,7 +87,12 @@ class YoutubeAsrPipelineRuntimeAdapter(PipelineRuntimeAdapter):
     def build_resume_ledger(self) -> ResumeLedger:
         return YoutubeAsrResumeLedger(config=self.config, object_store=self.object_store)
 
-    def resolve_completed_item_keys(self, completed_item_keys: set[str]) -> set[str]:
+    def resolve_completed_item_keys(
+        self,
+        *,
+        input_rows: list[dict[str, object]],
+        completed_item_keys: set[str],
+    ) -> set[str]:
         if self.bindings.allow_overwrite:
             return set()
         return completed_item_keys

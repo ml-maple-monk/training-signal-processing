@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-import json
 import shlex
 import shutil
 import sys
 import tempfile
 from pathlib import Path
-from urllib.parse import urlparse
 
-from ...core.utils import compute_sha256_file, join_s3_key, parse_env_file, utc_timestamp
-from ...runtime.submission import (
+from ...core.submission import (
     ArtifactRef,
     ArtifactStore,
     BootstrapSpec,
@@ -18,6 +15,7 @@ from ...runtime.submission import (
     RemoteInvocationSpec,
     SubmissionAdapter,
 )
+from ...core.utils import compute_sha256_file, join_s3_key, parse_env_file, utc_timestamp
 from .config import load_resolved_recipe_mapping
 from .models import PdfTask, RecipeConfig
 
@@ -92,35 +90,6 @@ class OcrSubmissionAdapter(SubmissionAdapter):
             uploaded_items=0,
             is_resume=True,
         )
-
-    def parse_remote_summary(self, stdout: str) -> dict[str, object]:
-        stripped = stdout.strip()
-        if not stripped:
-            raise ValueError("Remote job returned no JSON summary on stdout.")
-        # The remote driver emits progress lines (e.g. "[run] ...", MLflow
-        # banners) to stdout before the final JSON summary. Find the last
-        # top-level JSON object by scanning from the end for a line starting
-        # with '{' at column 0 and parsing from there through EOF.
-        candidate: str | None = None
-        for line_start in range(len(stripped) - 1, -1, -1):
-            if stripped[line_start] == "{" and (
-                line_start == 0 or stripped[line_start - 1] == "\n"
-            ):
-                candidate = stripped[line_start:]
-                break
-        if candidate is None:
-            candidate = stripped
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError as exc:
-            preview = stripped[:2000]
-            tail = stripped[-500:] if len(stripped) > 2500 else ""
-            raise ValueError(
-                f"Remote stdout is not valid JSON ({exc}). "
-                f"Length={len(stripped)}.\n"
-                f"--- stdout head ---\n{preview}\n"
-                + (f"--- stdout tail ---\n{tail}\n" if tail else "")
-            ) from exc
 
     def build_prepared_run(
         self,
@@ -210,27 +179,7 @@ class OcrSubmissionAdapter(SubmissionAdapter):
             ]
         )
         env = artifact_store.build_remote_env()
-        reverse_tunnels: tuple[str, ...] = ()
-        tracking_uri = self.resolve_remote_tracking_uri()
-        if tracking_uri:
-            env["MLFLOW_TRACKING_URI"] = tracking_uri
-            reverse_tunnels = (self.build_reverse_tunnel_spec(),)
-        return RemoteInvocationSpec(
-            command=command,
-            env=env,
-            reverse_tunnels=reverse_tunnels,
-        )
-
-    def resolve_remote_tracking_uri(self) -> str:
-        if not self.config.mlflow.enabled:
-            return ""
-        return f"http://127.0.0.1:{self.config.mlflow.remote_tunnel_port}"
-
-    def build_reverse_tunnel_spec(self) -> str:
-        parsed = urlparse(self.config.mlflow.local_tracking_uri)
-        if not parsed.hostname or not parsed.port:
-            raise ValueError("mlflow.local_tracking_uri must include an explicit host and port.")
-        return f"{self.config.mlflow.remote_tunnel_port}:{parsed.hostname}:{parsed.port}"
+        return RemoteInvocationSpec(command=command, env=env)
 
     def discover_pdf_paths(self, pdf_root: Path) -> list[Path]:
         if not pdf_root.is_dir():

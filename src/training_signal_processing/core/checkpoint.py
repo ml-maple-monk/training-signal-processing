@@ -3,12 +3,12 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from ..core.models import BatchCommit, RunArtifactLayout, RunState
+from .models import BatchCommit, RunArtifactLayout, RunState
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
 
 
-class ResumeLedger(ABC):
+class CheckpointStore(ABC):
     @abstractmethod
     def find_latest_partial_run(self) -> str | None:
         raise NotImplementedError
@@ -56,3 +56,10 @@ class ResumeLedger(ABC):
     @abstractmethod
     def mark_run_failed(self, run_state: RunState, message: str) -> RunState:
         raise NotImplementedError
+
+
+class ResumeLedger(CheckpointStore):
+    """Compatibility name for the batch-manifest checkpoint contract."""
+
+
+__all__ = ["CheckpointStore", "ResumeLedger"]

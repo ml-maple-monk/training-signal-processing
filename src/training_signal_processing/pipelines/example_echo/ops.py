@@ -11,19 +11,18 @@ Three ops cover the mandatory prepare → transform → export stages:
   `pipelines/example_echo/exporter.py` (run once per batch after Ray
   materializes).
 
-Op registration is automatic via `Op.__init_subclass__` at
-`ops/base.py:22`. Because this file lives under `custom_ops/` and its name
-does not start with `_`, the import sweep at `custom_ops/__init__.py:13`
-picks it up at module load time.
+Op registration is automatic via `Op.__init_subclass__` at `ops/base.py:22`.
+The example pipeline package imports this module from its `__init__.py`, so
+the concrete ops are registered before the recipe is validated.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from ..core.utils import join_s3_key, utc_isoformat
-from ..ops.builtin import BatchTransformOp, RowWiseMapperOp, SourcePreparationOp
-from ..pipelines.example_echo.models import EchoTask
+from ...core.utils import join_s3_key, utc_isoformat
+from ...ops.builtin import BatchTransformOp, RowWiseMapperOp, SourcePreparationOp
+from .models import EchoTask
 
 
 class PrepareEchoOp(SourcePreparationOp):

@@ -6,21 +6,34 @@ from pathlib import Path
 
 import pytest
 
+from training_signal_processing.core.submission import R2ArtifactStore
 from training_signal_processing.main import cli
+from training_signal_processing.pipelines.example_echo.config import (
+    load_recipe_config as load_example_echo_config,
+)
 from training_signal_processing.pipelines.ocr import config as ocr_config
 from training_signal_processing.pipelines.ocr.config import load_recipe_config
 from training_signal_processing.pipelines.ocr.submission import OcrSubmissionAdapter
-from training_signal_processing.runtime.submission import R2ArtifactStore
+from training_signal_processing.pipelines.tokenizer.config import (
+    load_recipe_config as load_tokenizer_config,
+)
+from training_signal_processing.pipelines.youtube_asr.config import (
+    load_recipe_config as load_youtube_asr_config,
+)
 
 
-def prepare_sample_ocr_run(monkeypatch: pytest.MonkeyPatch):
+def prepare_sample_ocr_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(OcrSubmissionAdapter, "count_pdf_pages", lambda self, path: 1)
+    pdf_root = tmp_path / "pdfs"
+    pdf_root.mkdir()
+    (pdf_root / "sample.pdf").write_bytes(b"%PDF-sample")
     config_path = Path("config/remote_ocr.sample.yaml")
-    config = load_recipe_config(config_path)
+    overrides = [f"input.local_pdf_root={pdf_root}", "input.max_files=1"]
+    config = load_recipe_config(config_path, overrides)
     return OcrSubmissionAdapter(
         config=config,
         config_path=config_path,
-        overrides=[],
+        overrides=overrides,
     ).prepare_new_run(R2ArtifactStore.from_config_file(config.r2), dry_run=True)
 
 
@@ -41,8 +54,11 @@ def test_main_module_entrypoint_shows_help() -> None:
     assert "ocr-remote-job" in result.stdout
 
 
-def test_ocr_submission_uses_package_cli_entrypoint(monkeypatch: pytest.MonkeyPatch) -> None:
-    prepared = prepare_sample_ocr_run(monkeypatch)
+def test_ocr_submission_uses_package_cli_entrypoint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared = prepare_sample_ocr_run(monkeypatch, tmp_path)
 
     assert prepared.invocation.command.startswith(
         "uv run --python 3.12 --group remote_ocr --group model python -m "
@@ -52,8 +68,9 @@ def test_ocr_submission_uses_package_cli_entrypoint(monkeypatch: pytest.MonkeyPa
 
 def test_ocr_submission_bootstrap_installs_remote_runtime(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    prepared = prepare_sample_ocr_run(monkeypatch)
+    prepared = prepare_sample_ocr_run(monkeypatch, tmp_path)
 
     assert "uv python install 3.12" in prepared.bootstrap.command
     assert "--group remote_ocr --group model --no-dev --frozen" in prepared.bootstrap.command
@@ -61,8 +78,9 @@ def test_ocr_submission_bootstrap_installs_remote_runtime(
 
 def test_ocr_submission_includes_aws_compatible_remote_env(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    prepared = prepare_sample_ocr_run(monkeypatch)
+    prepared = prepare_sample_ocr_run(monkeypatch, tmp_path)
 
     assert (
         prepared.invocation.env["AWS_ACCESS_KEY_ID"]
@@ -169,6 +187,92 @@ def test_load_recipe_config_rejects_non_positive_marker_ocr_resources(
     )
     with pytest.raises(ValueError, match="marker_ocr_resources.num_cpus must be positive"):
         load_recipe_config(cpu_config_path)
+
+
+@pytest.mark.parametrize(
+    ("loader", "source_path"),
+    [
+        (load_recipe_config, Path("config/remote_ocr.sample.yaml")),
+        (
+            load_example_echo_config,
+            Path("src/training_signal_processing/pipelines/example_echo/configs/baseline.yaml"),
+        ),
+        (load_tokenizer_config, Path("config/remote_tokenizer.sample.yaml")),
+        (load_youtube_asr_config, Path("config/remote_youtube_asr.sample.yaml")),
+    ],
+)
+def test_recipe_configs_reject_removed_ray_async_upload(
+    loader,
+    source_path: Path,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / source_path.name
+    config_path.write_text(
+        source_path.read_text(encoding="utf-8").replace(
+            "ray:\n",
+            "ray:\n  async_upload:\n    enabled: true\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="ray.async_upload was removed"):
+        loader(config_path)
+
+
+@pytest.mark.parametrize(
+    ("loader", "source_path", "stale_key"),
+    [
+        (load_recipe_config, Path("config/remote_ocr.sample.yaml"), "local_tracking_uri"),
+        (
+            load_example_echo_config,
+            Path("src/training_signal_processing/pipelines/example_echo/configs/baseline.yaml"),
+            "remote_tunnel_port",
+        ),
+        (load_tokenizer_config, Path("config/remote_tokenizer.sample.yaml"), "local_tracking_uri"),
+        (
+            load_youtube_asr_config,
+            Path("config/remote_youtube_asr.sample.yaml"),
+            "remote_tunnel_port",
+        ),
+    ],
+)
+def test_recipe_configs_reject_removed_mlflow_tunnel_keys(
+    loader,
+    source_path: Path,
+    stale_key: str,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / source_path.name
+    stale_line = (
+        "  local_tracking_uri: http://127.0.0.1:5000\n"
+        if stale_key == "local_tracking_uri"
+        else "  remote_tunnel_port: 15000\n"
+    )
+    config_path.write_text(
+        source_path.read_text(encoding="utf-8").replace(
+            '  tracking_uri: ""\n',
+            f'  tracking_uri: ""\n{stale_line}',
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Reverse-tunnel MLflow was removed"):
+        loader(config_path)
+
+
+def test_recipe_config_requires_tracking_uri_when_mlflow_enabled(tmp_path: Path) -> None:
+    config_path = tmp_path / "remote_ocr_mlflow_enabled.yaml"
+    config_path.write_text(
+        Path("config/remote_ocr.sample.yaml")
+        .read_text(encoding="utf-8")
+        .replace("enabled: false", "enabled: true", 1),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="mlflow.tracking_uri is required"):
+        load_recipe_config(config_path)
 
 
 def test_load_recipe_config_deep_merges_overlay_files(

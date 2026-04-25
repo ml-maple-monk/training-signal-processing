@@ -5,8 +5,8 @@ from pathlib import Path
 
 import click
 
+from ...core.submission import R2ArtifactStore, SshRemoteTransport, SubmissionCoordinator
 from ...ops.registry import RegisteredOpRegistry
-from ...runtime.submission import R2ArtifactStore, SshRemoteTransport, SubmissionCoordinator
 from .config import load_recipe_config
 from .submission import TokenizerSubmissionAdapter
 

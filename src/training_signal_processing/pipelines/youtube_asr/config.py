@@ -6,7 +6,6 @@ from typing import Any
 
 from ...core import config_loading
 from ...core.models import (
-    MlflowConfig,
     ObservabilityConfig,
     R2Config,
     RayConfig,
@@ -62,18 +61,18 @@ def build_recipe_config(raw: dict[str, Any], config_path: Path) -> RecipeConfig:
     validate_recipe_constraints(raw)
     ops = [config_loading.build_op_config(item) for item in raw["ops"]]
     ray_raw = dict(raw["ray"])
-    async_upload = config_loading.pop_async_upload_config(ray_raw)
+    config_loading.reject_removed_ray_async_upload(ray_raw)
     return RecipeConfig(
         run_name=raw["run"]["name"],
         config_version=int(raw["run"]["config_version"]),
         ssh=SshConfig(**raw["ssh"]),
         remote=RemoteRuntimeConfig(**raw["remote"]),
-        ray=RayConfig(**ray_raw, async_upload=async_upload),
+        ray=RayConfig(**ray_raw),
         r2=R2Config(**raw["r2"]),
         input=InputConfig(**raw["input"]),
         download=DownloadConfig(**raw["download"]),
         asr=AsrConfig(**raw["asr"]),
-        mlflow=MlflowConfig(**raw["mlflow"]),
+        mlflow=config_loading.build_mlflow_config(raw["mlflow"]),
         observability=ObservabilityConfig(**raw["observability"]),
         resumability=ResumeConfig(**raw["resumability"]),
         ops=ops,

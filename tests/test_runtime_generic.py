@@ -3,6 +3,17 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from training_signal_processing.core.checkpoint import ResumeLedger
+from training_signal_processing.core.dataset import (
+    ConfiguredRayDatasetBuilder,
+    DatasetBuilder,
+    DatasetHandle,
+)
+from training_signal_processing.core.execution import (
+    PipelineRuntimeAdapter,
+    StreamingRayExecutor,
+)
+from training_signal_processing.core.exporter import Exporter
 from training_signal_processing.core.models import (
     BatchCommit,
     OpConfig,
@@ -14,20 +25,9 @@ from training_signal_processing.core.models import (
     RuntimeRunBindings,
     RuntimeTrackingContext,
 )
+from training_signal_processing.core.observability import ExecutionLogger
 from training_signal_processing.ops.base import Batch, MapperOp
 from training_signal_processing.ops.registry import RegisteredOpRegistry
-from training_signal_processing.runtime.dataset import (
-    ConfiguredRayDatasetBuilder,
-    DatasetBuilder,
-    DatasetHandle,
-)
-from training_signal_processing.runtime.executor import (
-    PipelineRuntimeAdapter,
-    StreamingRayExecutor,
-)
-from training_signal_processing.runtime.exporter import Exporter
-from training_signal_processing.runtime.observability import ExecutionLogger
-from training_signal_processing.runtime.resume import ResumeLedger
 
 
 class SimpleDatasetHandle(DatasetHandle):
@@ -128,10 +128,13 @@ class ExportGenericOp(MapperOp):
 class FakeExporter(Exporter):
     def __init__(self) -> None:
         self.finalized_run_state: RunState | None = None
+        self.fail_on_batch_id = ""
 
     def export_batch(self, batch_id: str, rows: Batch):
         from training_signal_processing.core.models import ExportBatchResult
 
+        if batch_id == self.fail_on_batch_id:
+            raise RuntimeError(f"injected export failure on {batch_id}")
         return ExportBatchResult(
             batch_id=batch_id,
             row_count=len(rows),
@@ -326,10 +329,17 @@ class FakePipelineAdapter(PipelineRuntimeAdapter):
     def build_dataset_builder(self) -> DatasetBuilder:
         return self.dataset_builder
 
+    def resolve_completed_item_keys(
+        self,
+        *,
+        input_rows: list[dict[str, object]],
+        completed_item_keys: set[str],
+    ) -> set[str]:
+        return completed_item_keys
+
 
 def test_runtime_modules_do_not_import_pipeline_packages(capsys) -> None:
-    """Enforce via import-linter that shared layers (core, ops, runtime, storage)
-    never import from pipelines (direct or transitive).
+    """Enforce via import-linter that shared layers never import pipelines.
 
     The contract is declared in pyproject.toml under [tool.importlinter]. This test
     invokes the linter in-process via its public API and asserts exit code 0. When
@@ -443,6 +453,83 @@ def test_streaming_executor_resume_continues_batch_numbering(capsys) -> None:
     assert "first_batch_materialized" in phases
 
 
+def test_streaming_executor_does_not_commit_batch_when_export_fails() -> None:
+    adapter = FakePipelineAdapter()
+    adapter.exporter.fail_on_batch_id = "batch-00002"
+
+    summary = StreamingRayExecutor(adapter).run()
+
+    assert summary["status"] == "failed"
+    assert "injected export failure on batch-00002" in summary["error_message"]
+    assert adapter.resume_ledger.run_state is not None
+    assert adapter.resume_ledger.run_state.status == "failed"
+    assert adapter.resume_ledger.run_state.last_committed_batch == 1
+
+
+class RepairingResumeLedger(FakeResumeLedger):
+    def initialize_run_state(
+        self,
+        *,
+        run_id: str,
+        total_items: int,
+        pending_items: int,
+        precompleted_count: int,
+        artifact_layout: RunArtifactLayout,
+        tracking_run_id: str,
+    ) -> RunState:
+        existing = super().initialize_run_state(
+            run_id=run_id,
+            total_items=total_items,
+            pending_items=pending_items,
+            precompleted_count=precompleted_count,
+            artifact_layout=artifact_layout,
+            tracking_run_id=tracking_run_id,
+        )
+        self.run_state = RunState(
+            **{
+                **existing.to_dict(),
+                "last_committed_batch": 12,
+            }
+        )
+        return self.run_state
+
+
+class RepairingResumePipelineAdapter(FakePipelineAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.resume_ledger = RepairingResumeLedger()
+
+
+def test_streaming_executor_uses_repaired_batch_baseline(capsys) -> None:
+    adapter = RepairingResumePipelineAdapter()
+    adapter.resume_ledger.run_state = RunState(
+        run_id="fake-run-001",
+        status="running",
+        total_items=2,
+        pending_items=2,
+        success_count=7,
+        failed_count=0,
+        skipped_count=0,
+        last_committed_batch=7,
+        started_at="2026-04-22T00:00:00Z",
+        updated_at="2026-04-22T00:00:00Z",
+        source_root_key="source/items",
+        output_root_key="output/items/fake-run-001",
+        tracking_run_id="disabled:fake-run-001",
+        current_phase="resume_state_loaded",
+        last_phase_at="2026-04-22T00:00:00Z",
+    )
+
+    summary = StreamingRayExecutor(adapter).run()
+    captured = capsys.readouterr()
+
+    assert summary["status"] == "success"
+    assert adapter.resume_ledger.run_state is not None
+    assert adapter.resume_ledger.run_state.last_committed_batch == 14
+    assert "[batch:start] batch_id=batch-00013" in captured.out
+    assert "[batch:commit] batch_id=batch-00014" in captured.out
+
+
 def test_configured_ray_dataset_builder_clamps_target_num_blocks(monkeypatch) -> None:
     calls: list[int] = []
 
@@ -452,7 +539,7 @@ def test_configured_ray_dataset_builder_clamps_target_num_blocks(monkeypatch) ->
             return self
 
     monkeypatch.setattr(
-        "training_signal_processing.runtime.dataset.ray.data.from_items",
+        "training_signal_processing.core.dataset.ray.data.from_items",
         lambda rows: FakeDataset(),
     )
     builder = ConfiguredRayDatasetBuilder(
@@ -478,7 +565,7 @@ def test_configured_ray_dataset_builder_skips_repartition_for_single_row(monkeyp
             return self
 
     monkeypatch.setattr(
-        "training_signal_processing.runtime.dataset.ray.data.from_items",
+        "training_signal_processing.core.dataset.ray.data.from_items",
         lambda rows: FakeDataset(),
     )
     builder = ConfiguredRayDatasetBuilder(
@@ -563,133 +650,3 @@ def test_streaming_executor_uses_adapter_transform_resources() -> None:
             "num_cpus": None,
         },
     ]
-
-
-class RecordingCoordinator:
-    """Test double for AsyncUploadCoordinator lifecycle verification."""
-
-    def __init__(self, *, drain_fails_on_batch: int | None = None) -> None:
-        self.drain_calls = 0
-        self.abort_calls = 0
-        self.close_calls = 0
-        self.submit_calls: list[tuple[str, bytes]] = []
-        # Track order of drain vs commit_batch via an external log mutated
-        # by the fake ledger wrapping commit_batch.
-        self.events: list[str] = []
-        self._drain_fails_on_batch = drain_fails_on_batch
-
-    def submit(self, key: str, body: bytes) -> None:
-        self.submit_calls.append((key, body))
-
-    def drain(self, timeout: float | None = None) -> None:
-        self.drain_calls += 1
-        self.events.append(f"drain:{self.drain_calls}")
-        if (
-            self._drain_fails_on_batch is not None
-            and self.drain_calls == self._drain_fails_on_batch
-        ):
-            raise RuntimeError(f"injected drain failure on batch {self.drain_calls}")
-
-    def abort(self) -> int:
-        self.abort_calls += 1
-        return 0
-
-    def close(self) -> None:
-        self.close_calls += 1
-
-    def depth(self) -> int:
-        return 0
-
-
-class ThreeBatchAdapter(FakePipelineAdapter):
-    """Three-row adapter (batch_size=1 → 3 batches) for lifecycle tests."""
-
-    def load_input_rows(self) -> list[dict[str, object]]:
-        return [{"id": "row-a"}, {"id": "row-b"}, {"id": "row-c"}]
-
-
-def _ledger_event_recorder(
-    adapter: FakePipelineAdapter, coordinator: RecordingCoordinator
-) -> None:
-    """Wrap commit_batch on the adapter's ledger to record event ordering."""
-    original = adapter.resume_ledger.commit_batch
-
-    def wrapped(**kwargs: Any):  # type: ignore[no-untyped-def]
-        coordinator.events.append(f"commit:{kwargs['batch_index']}")
-        return original(**kwargs)
-
-    adapter.resume_ledger.commit_batch = wrapped  # type: ignore[assignment]
-
-
-def test_streaming_executor_drains_coordinator_before_each_commit(
-    monkeypatch,
-) -> None:
-    adapter = ThreeBatchAdapter()
-    coordinator = RecordingCoordinator()
-    _ledger_event_recorder(adapter, coordinator)
-
-    executor = StreamingRayExecutor(adapter)
-    monkeypatch.setattr(
-        executor,
-        "_build_upload_coordinator",
-        lambda *, execution, runtime_context: coordinator,
-    )
-
-    summary = executor.run()
-
-    assert summary["status"] == "success"
-    # One drain per batch (3) plus one final drain after finalize_run.
-    assert coordinator.drain_calls == 4
-    assert coordinator.abort_calls == 0
-    assert coordinator.close_calls == 1
-    # Drain must precede commit for every batch.
-    expected_prefix = [
-        "drain:1",
-        "commit:1",
-        "drain:2",
-        "commit:2",
-        "drain:3",
-        "commit:3",
-    ]
-    assert coordinator.events[: len(expected_prefix)] == expected_prefix
-
-
-def test_streaming_executor_aborts_when_drain_raises_mid_run(
-    monkeypatch,
-) -> None:
-    adapter = ThreeBatchAdapter()
-    coordinator = RecordingCoordinator(drain_fails_on_batch=2)
-    _ledger_event_recorder(adapter, coordinator)
-
-    executor = StreamingRayExecutor(adapter)
-    monkeypatch.setattr(
-        executor,
-        "_build_upload_coordinator",
-        lambda *, execution, runtime_context: coordinator,
-    )
-
-    summary = executor.run()
-
-    assert summary["status"] == "failed"
-    assert "injected drain failure" in summary["error_message"]
-    # Batch 1 committed, batch 2 drain failed → batch 2 not committed.
-    assert "commit:1" in coordinator.events
-    assert "commit:2" not in coordinator.events
-    assert "commit:3" not in coordinator.events
-    # abort() was called exactly once in the except path, before close().
-    assert coordinator.abort_calls == 1
-    assert coordinator.close_calls == 1
-    # The ledger's run state must reflect the failure.
-    assert adapter.resume_ledger.run_state is not None
-    assert adapter.resume_ledger.run_state.status == "failed"
-
-
-def test_streaming_executor_skips_coordinator_when_disabled() -> None:
-    """When async_upload is None (default), no coordinator is built."""
-    adapter = FakePipelineAdapter()
-    # Default RayConfig has async_upload=None → _build_upload_coordinator returns None.
-    summary = StreamingRayExecutor(adapter).run()
-    assert summary["status"] == "success"
-    # Nothing to assert directly — the absence of coordinator state IS the test.
-    # The existing test_streaming_executor_runs_with_fake_pipeline_adapter
-    # already exercises the full sync path.

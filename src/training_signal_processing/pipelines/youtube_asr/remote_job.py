@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from ...core.models import RuntimeRunBindings
-from ...runtime.remote_job import build_remote_job_cli
-from ...storage.object_store import R2ObjectStore
+from ...core.remote import build_remote_job_cli
+from ...core.storage import R2ObjectStore
 from .config import build_recipe_config
 from .models import RecipeConfig
 from .runtime import YoutubeAsrPipelineRuntimeAdapter

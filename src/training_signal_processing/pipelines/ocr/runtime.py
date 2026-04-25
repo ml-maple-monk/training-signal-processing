@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-import os
-
+from ...core.checkpoint import CheckpointStore
+from ...core.execution import PipelineRuntimeAdapter
+from ...core.exporter import Exporter
 from ...core.models import (
+    OpConfig,
     OpRuntimeContext,
     RayConfig,
     RayTransformResources,
@@ -10,17 +12,14 @@ from ...core.models import (
     RuntimeRunBindings,
     RuntimeTrackingContext,
 )
+from ...core.observability import ExecutionLogger
+from ...core.storage import R2ObjectStore
 from ...core.utils import join_s3_key
 from ...ops.base import Op
 from ...ops.registry import OpRegistry, RegisteredOpRegistry
-from ...runtime.executor import PipelineRuntimeAdapter
-from ...runtime.exporter import Exporter
-from ...runtime.observability import ExecutionLogger
-from ...runtime.resume import ResumeLedger
-from ...storage.object_store import R2ObjectStore
 from .exporter import OcrMarkdownExporter
-from .models import RecipeConfig
-from .resume import OcrResumeLedger
+from .models import OcrRayConfig, RecipeConfig
+from .resume import OcrCheckpointStore
 
 
 class OcrPipelineRuntimeAdapter(PipelineRuntimeAdapter):
@@ -38,14 +37,14 @@ class OcrPipelineRuntimeAdapter(PipelineRuntimeAdapter):
     def get_run_bindings(self) -> RuntimeRunBindings:
         return self.bindings
 
-    def get_execution_config(self):  # type: ignore[override]
+    def get_execution_config(self) -> OcrRayConfig:
         return self.config.ray
 
     def get_tracking_context(self) -> RuntimeTrackingContext:
         marker = self.config.ray.marker_ocr_resources
         return RuntimeTrackingContext(
             enabled=self.config.mlflow.enabled,
-            tracking_uri=os.environ.get("MLFLOW_TRACKING_URI", ""),
+            tracking_uri=self.config.mlflow.tracking_uri,
             experiment_name=self.config.mlflow.experiment_name,
             run_name=self.config.run_name,
             executor_type=self.config.ray.executor_type,
@@ -58,7 +57,7 @@ class OcrPipelineRuntimeAdapter(PipelineRuntimeAdapter):
             },
         )
 
-    def get_op_configs(self):
+    def get_op_configs(self) -> list[OpConfig]:
         return self.config.ops
 
     def get_artifact_layout(self) -> RunArtifactLayout:
@@ -94,13 +93,24 @@ class OcrPipelineRuntimeAdapter(PipelineRuntimeAdapter):
     def build_exporter(self) -> Exporter:
         return OcrMarkdownExporter(self.object_store)
 
-    def build_resume_ledger(self) -> ResumeLedger:
-        return OcrResumeLedger(config=self.config, object_store=self.object_store)
+    def build_checkpoint_store(self) -> OcrCheckpointStore:
+        return OcrCheckpointStore(config=self.config, object_store=self.object_store)
 
-    def resolve_completed_item_keys(self, completed_item_keys: set[str]) -> set[str]:
-        if self.bindings.allow_overwrite:
-            return set()
-        return completed_item_keys
+    def build_resume_ledger(self) -> CheckpointStore:
+        return self.build_checkpoint_store()
+
+    def resolve_completed_item_keys(
+        self,
+        *,
+        input_rows: list[dict[str, object]],
+        completed_item_keys: set[str],
+    ) -> set[str]:
+        return self.build_checkpoint_store().recover_completed_item_keys(
+            input_rows=input_rows,
+            completed_item_keys=completed_item_keys,
+            artifact_layout=self.get_artifact_layout(),
+            allow_overwrite=self.bindings.allow_overwrite,
+        )
 
     def resolve_transform_resources(
         self,

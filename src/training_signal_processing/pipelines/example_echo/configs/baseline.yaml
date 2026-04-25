@@ -48,8 +48,7 @@ input:
 
 mlflow:
   enabled: false
-  local_tracking_uri: http://127.0.0.1:5000
-  remote_tunnel_port: 15000
+  tracking_uri: ""
   experiment_name: example-echo
 
 observability:

@@ -8,7 +8,8 @@ This repo now includes a small remote OCR pipeline with:
 - single-node remote `ray.data` execution
 - Marker OCR
 - R2 input/output
-- MLflow progress over a framework-managed persistent SSH reverse tunnel (ControlMaster)
+- R2-backed progress through run state, manifests, and event objects
+- optional MLflow only through a directly reachable tracking URI
 - resumability through batch manifests in R2
 
 ## Main Entry Point
@@ -31,15 +32,11 @@ uv run --group remote_ocr python -m training_signal_processing.main run --config
 4. Sync only `pyproject.toml`, `uv.lock`, and `src/` to the remote root.
 5. Bootstrap `uv`, Python 3.12, and the `remote_ocr` dependency group remotely.
 6. Wait for the local PDF upload (rclone) to finish so the remote never races its inputs.
-7. Open (or reuse) a persistent `-R` reverse tunnel for each declared tunnel spec via
-   `ensure_reverse_tunnels`. Each tunnel runs as an `ssh -fN -o ControlMaster=yes`
-   process whose socket lives at `~/.cache/ocr-remote-launcher/tunnels/t-<hash>.sock`
-   and outlives the launcher SSH.
-8. Launch the remote job **detached** in its own process group via `launch_detached`:
+7. Launch the remote job **detached** in its own process group via `launch_detached`:
    the pod writes its pgid to `/root/ocr-jobs/<run_id>/job.pgid` and stdout to
-   `.../job.log`. The local CLI returns a `LaunchHandle` + `TunnelHandle` JSON and
-   exits — **exit code 0 means launched successfully, not run complete**. R2
-   credentials are passed as env vars only.
+   `.../job.log`. The local CLI returns a `LaunchHandle` JSON and exits —
+   **exit code 0 means launched successfully, not run complete**. R2 credentials
+   are passed as env vars only.
 
 ## Remote Execution Flow
 
@@ -58,12 +55,10 @@ uv run --group remote_ocr python -m training_signal_processing.main run --config
 
 ## Observability
 
-- The local machine already runs MLflow on `http://127.0.0.1:5000`.
-- The framework ensures a persistent reverse tunnel exists before launch; its
-  ControlMaster socket lives at `~/.cache/ocr-remote-launcher/tunnels/` and is
-  reused across launches to the same pod. Manual teardown is
-  `ssh -S <sock> -O exit <ssh_target>`.
-- The remote `ProgressTrackerActor` logs run-level and batch-level metrics to MLflow.
+- `run_state.json`, batch manifests, and event objects in R2 are the durable
+  progress and recovery source of truth.
+- MLflow is optional. When enabled, `mlflow.tracking_uri` must be reachable from
+  the logging process directly; the framework does not open SSH tunnels.
 
 ## Resumability
 

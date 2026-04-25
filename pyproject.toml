@@ -35,7 +35,6 @@ model = [
     "transformers>=4.51.0",
 ]
 remote_ocr = [
-    "aioboto3>=13",
     "boto3>=1.39.0",
     "click>=8.1.8",
     "marker-pdf>=1.10.0",
@@ -61,8 +60,6 @@ select = ["E", "F", "I"]
 root_packages = [
     "training_signal_processing.core",
     "training_signal_processing.ops",
-    "training_signal_processing.runtime",
-    "training_signal_processing.storage",
     "training_signal_processing.pipelines",
 ]
 
@@ -72,8 +69,6 @@ type = "forbidden"
 source_modules = [
     "training_signal_processing.core",
     "training_signal_processing.ops",
-    "training_signal_processing.runtime",
-    "training_signal_processing.storage",
 ]
 forbidden_modules = [
     "training_signal_processing.pipelines",

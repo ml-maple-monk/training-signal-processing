@@ -10,8 +10,8 @@ import boto3
 import pyarrow.fs as pafs
 from botocore.exceptions import ClientError
 
-from ..core.models import R2Config
-from ..core.utils import parse_env_file, write_json_bytes, write_jsonl_bytes
+from .models import R2Config
+from .utils import parse_env_file, write_json_bytes, write_jsonl_bytes
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
 
@@ -175,8 +175,32 @@ def ensure_r2_config_complete(config: R2Config) -> R2Config:
     return config
 
 
+def build_r2_env(config: R2Config) -> dict[str, str]:
+    resolved = ensure_r2_config_complete(config)
+    return {
+        "R2_BUCKET": resolved.bucket,
+        "R2_ACCESS_KEY_ID": resolved.access_key_id,
+        "R2_SECRET_ACCESS_KEY": resolved.secret_access_key,
+        "R2_REGION": resolved.region,
+        "R2_ENDPOINT_URL": resolved.endpoint_url,
+        "AWS_ACCESS_KEY_ID": resolved.access_key_id,
+        "AWS_SECRET_ACCESS_KEY": resolved.secret_access_key,
+        "AWS_DEFAULT_REGION": resolved.region,
+        "MLFLOW_S3_ENDPOINT_URL": resolved.endpoint_url,
+    }
+
+
 def strip_endpoint_scheme(endpoint_url: str) -> str:
     parsed = urlparse(endpoint_url)
     if parsed.netloc:
         return parsed.netloc
     return endpoint_url.removeprefix("https://").removeprefix("http://")
+
+
+__all__ = [
+    "ObjectStore",
+    "R2ObjectStore",
+    "build_r2_env",
+    "ensure_r2_config_complete",
+    "strip_endpoint_scheme",
+]

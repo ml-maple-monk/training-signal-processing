@@ -6,16 +6,16 @@ from pathlib import Path
 import click
 
 from .core.models import OpRuntimeContext
+from .core.submission import (
+    R2ArtifactStore,
+    SshRemoteTransport,
+    SubmissionCoordinator,
+)
 from .core.utils import join_s3_key, read_jsonl_rows
 from .ops.registry import RegisteredOpRegistry
 from .pipelines.ocr.config import load_recipe_config
 from .pipelines.ocr.remote_job import cli as ocr_remote_job_cli
 from .pipelines.ocr.submission import OcrSubmissionAdapter
-from .runtime.submission import (
-    R2ArtifactStore,
-    SshRemoteTransport,
-    SubmissionCoordinator,
-)
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
 
@@ -62,8 +62,7 @@ def list_ops_command() -> None:
         descriptions = registry.describe_registered_ops()
         if not descriptions:
             click.echo(
-                "No concrete ops are registered yet. Add a concrete op class to "
-                "src/training_signal_processing/custom_ops/."
+                "No concrete ops are registered yet. Import a pipeline package that defines ops."
             )
             return
         for op_name, stage, op_type in descriptions:

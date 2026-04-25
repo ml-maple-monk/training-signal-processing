@@ -3,14 +3,14 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+from ...core.checkpoint import CheckpointStore
 from ...core.models import BatchCommit, RunArtifactLayout, RunState
+from ...core.storage import ObjectStore
 from ...core.utils import join_s3_key, utc_isoformat
-from ...runtime.resume import ResumeLedger
-from ...storage.object_store import ObjectStore
-from .models import DocumentResult, RecipeConfig
+from .models import DocumentResult, PdfTask, RecipeConfig, build_markdown_r2_key
 
 
-class OcrResumeLedger(ResumeLedger):
+class OcrCheckpointStore(CheckpointStore):
     def __init__(self, config: RecipeConfig, object_store: ObjectStore) -> None:
         self.config = config
         self.object_store = object_store
@@ -39,7 +39,7 @@ class OcrResumeLedger(ResumeLedger):
         return RunState.from_dict(self.object_store.read_json(run_state_key))
 
     def load_completed_item_keys(self, run_id: str) -> set[str]:
-        prefix = join_s3_key(self.build_run_root(run_id), "manifests")
+        prefix = self.build_manifests_prefix(run_id)
         completed_keys: set[str] = set()
         for key in self.object_store.list_keys(prefix):
             if not key.endswith(".jsonl"):
@@ -49,6 +49,28 @@ class OcrResumeLedger(ResumeLedger):
                 if result.status == "success":
                     completed_keys.add(result.source_r2_key)
         return completed_keys
+
+    def recover_completed_item_keys(
+        self,
+        *,
+        input_rows: list[dict[str, object]],
+        completed_item_keys: set[str],
+        artifact_layout: RunArtifactLayout,
+        allow_overwrite: bool,
+    ) -> set[str]:
+        if allow_overwrite:
+            return set()
+        existing_markdown_keys = self.list_existing_markdown_keys(artifact_layout.output_root_key)
+        recovered_item_keys = set(completed_item_keys)
+        for row in input_rows:
+            task = PdfTask.from_dict(row)
+            markdown_key = build_markdown_r2_key(
+                artifact_layout.output_root_key,
+                task.relative_path,
+            )
+            if markdown_key in existing_markdown_keys:
+                recovered_item_keys.add(task.source_r2_key)
+        return recovered_item_keys
 
     def initialize_run_state(
         self,
@@ -62,23 +84,22 @@ class OcrResumeLedger(ResumeLedger):
     ) -> RunState:
         existing = self.load_run_state(run_id)
         if existing is not None:
-            return existing
-        run_state = RunState(
+            repaired_state = self.repair_run_state(
+                existing=existing,
+                total_items=total_items,
+                precompleted_count=precompleted_count,
+                artifact_layout=artifact_layout,
+                tracking_run_id=tracking_run_id,
+            )
+            self.write_run_state(repaired_state)
+            return repaired_state
+        run_state = self.build_initial_run_state(
             run_id=run_id,
-            status="running",
-            total_items=total_items,
             pending_items=pending_items,
-            success_count=0,
-            failed_count=0,
-            skipped_count=precompleted_count,
-            last_committed_batch=0,
-            started_at=utc_isoformat(),
-            updated_at=utc_isoformat(),
-            source_root_key=artifact_layout.source_root_key,
-            output_root_key=artifact_layout.output_root_key,
+            total_items=total_items,
+            precompleted_count=precompleted_count,
+            artifact_layout=artifact_layout,
             tracking_run_id=tracking_run_id,
-            current_phase="run_initialized",
-            last_phase_at=utc_isoformat(),
         )
         self.write_run_state(run_state)
         return run_state
@@ -92,51 +113,19 @@ class OcrResumeLedger(ResumeLedger):
         rows: list[dict[str, Any]],
     ) -> tuple[BatchCommit, RunState]:
         batch_id = f"batch-{batch_index:05d}"
-        manifest_key = join_s3_key(run_state.output_root_key, f"manifests/{batch_id}.jsonl")
-        event_key = join_s3_key(run_state.output_root_key, f"events/{batch_id}.json")
         results = [DocumentResult.from_dict(row) for row in rows]
-        success_count = sum(1 for row in results if row.status == "success")
-        failed_count = sum(1 for row in results if row.status == "failed")
-        skipped_count = sum(1 for row in results if row.status == "skipped_existing")
-        batch_commit = BatchCommit(
+        batch_commit = self.build_batch_commit(
             batch_id=batch_id,
             input_row_count=input_row_count,
-            output_row_count=len(results),
-            success_count=success_count,
-            failed_count=failed_count,
-            skipped_count=skipped_count,
-            duration_sec=sum(row.duration_sec for row in results),
-            manifest_key=manifest_key,
-            event_key=event_key,
-        )
-        self.object_store.write_jsonl(manifest_key, [result.to_dict() for result in results])
-        self.object_store.write_json(
-            event_key,
-            {
-                "batch_id": batch_id,
-                "input_row_count": input_row_count,
-                "output_row_count": len(results),
-                "success_count": success_count,
-                "failed_count": failed_count,
-                "skipped_count": skipped_count,
-            },
-        )
-        updated_state = RunState(
-            run_id=run_state.run_id,
-            status="running",
-            total_items=run_state.total_items,
-            pending_items=max(run_state.pending_items - input_row_count, 0),
-            success_count=run_state.success_count + success_count,
-            failed_count=run_state.failed_count + failed_count,
-            skipped_count=run_state.skipped_count + skipped_count,
-            last_committed_batch=batch_index,
-            started_at=run_state.started_at,
-            updated_at=utc_isoformat(),
-            source_root_key=run_state.source_root_key,
             output_root_key=run_state.output_root_key,
-            tracking_run_id=run_state.tracking_run_id,
-            current_phase=run_state.current_phase,
-            last_phase_at=run_state.last_phase_at,
+            results=results,
+        )
+        self.write_batch_artifacts(batch_commit=batch_commit, results=results)
+        updated_state = self.advance_run_state(
+            run_state=run_state,
+            batch_index=batch_index,
+            input_row_count=input_row_count,
+            batch_commit=batch_commit,
         )
         self.write_run_state(updated_state)
         return batch_commit, updated_state
@@ -179,5 +168,150 @@ class OcrResumeLedger(ResumeLedger):
     def build_run_root(self, run_id: str) -> str:
         return join_s3_key(self.config.r2.output_prefix, run_id)
 
+    def build_manifest_key(self, output_root_key: str, batch_id: str) -> str:
+        return join_s3_key(output_root_key, f"manifests/{batch_id}.jsonl")
+
+    def build_event_key(self, output_root_key: str, batch_id: str) -> str:
+        return join_s3_key(output_root_key, f"events/{batch_id}.json")
+
+    def build_manifests_prefix(self, run_id: str) -> str:
+        return join_s3_key(self.build_run_root(run_id), "manifests")
+
     def build_run_state_key(self, run_id: str) -> str:
         return join_s3_key(self.build_run_root(run_id), "run_state.json")
+
+    def list_existing_markdown_keys(self, output_root_key: str) -> set[str]:
+        return {
+            key
+            for key in self.object_store.list_keys(join_s3_key(output_root_key, "markdown"))
+            if key.endswith(".md")
+        }
+
+    def repair_run_state(
+        self,
+        *,
+        existing: RunState,
+        total_items: int,
+        precompleted_count: int,
+        artifact_layout: RunArtifactLayout,
+        tracking_run_id: str,
+    ) -> RunState:
+        durable_completed_count = min(precompleted_count, total_items)
+        repaired_success_count = min(existing.success_count, durable_completed_count)
+        return replace(
+            existing,
+            status="running",
+            total_items=total_items,
+            pending_items=max(total_items - durable_completed_count, 0),
+            success_count=repaired_success_count,
+            skipped_count=max(durable_completed_count - repaired_success_count, 0),
+            last_committed_batch=max(
+                existing.last_committed_batch,
+                self.find_highest_manifest_batch_index(existing.run_id),
+            ),
+            updated_at=utc_isoformat(),
+            source_root_key=existing.source_root_key or artifact_layout.source_root_key,
+            output_root_key=existing.output_root_key or artifact_layout.output_root_key,
+            tracking_run_id=existing.tracking_run_id or tracking_run_id,
+        )
+
+    def build_initial_run_state(
+        self,
+        *,
+        run_id: str,
+        total_items: int,
+        pending_items: int,
+        precompleted_count: int,
+        artifact_layout: RunArtifactLayout,
+        tracking_run_id: str,
+    ) -> RunState:
+        timestamp = utc_isoformat()
+        return RunState(
+            run_id=run_id,
+            status="running",
+            total_items=total_items,
+            pending_items=pending_items,
+            success_count=0,
+            failed_count=0,
+            skipped_count=precompleted_count,
+            last_committed_batch=0,
+            started_at=timestamp,
+            updated_at=timestamp,
+            source_root_key=artifact_layout.source_root_key,
+            output_root_key=artifact_layout.output_root_key,
+            tracking_run_id=tracking_run_id,
+            current_phase="run_initialized",
+            last_phase_at=timestamp,
+        )
+
+    def build_batch_commit(
+        self,
+        *,
+        batch_id: str,
+        input_row_count: int,
+        output_root_key: str,
+        results: list[DocumentResult],
+    ) -> BatchCommit:
+        return BatchCommit(
+            batch_id=batch_id,
+            input_row_count=input_row_count,
+            output_row_count=len(results),
+            success_count=sum(1 for row in results if row.status == "success"),
+            failed_count=sum(1 for row in results if row.status == "failed"),
+            skipped_count=sum(1 for row in results if row.status == "skipped_existing"),
+            duration_sec=sum(row.duration_sec for row in results),
+            manifest_key=self.build_manifest_key(output_root_key, batch_id),
+            event_key=self.build_event_key(output_root_key, batch_id),
+        )
+
+    def write_batch_artifacts(
+        self,
+        *,
+        batch_commit: BatchCommit,
+        results: list[DocumentResult],
+    ) -> None:
+        self.object_store.write_jsonl(
+            batch_commit.manifest_key,
+            [result.to_dict() for result in results],
+        )
+        self.object_store.write_json(
+            batch_commit.event_key,
+            {
+                "batch_id": batch_commit.batch_id,
+                "input_row_count": batch_commit.input_row_count,
+                "output_row_count": batch_commit.output_row_count,
+                "success_count": batch_commit.success_count,
+                "failed_count": batch_commit.failed_count,
+                "skipped_count": batch_commit.skipped_count,
+            },
+        )
+
+    def advance_run_state(
+        self,
+        *,
+        run_state: RunState,
+        batch_index: int,
+        input_row_count: int,
+        batch_commit: BatchCommit,
+    ) -> RunState:
+        return replace(
+            run_state,
+            status="running",
+            pending_items=max(run_state.pending_items - input_row_count, 0),
+            success_count=run_state.success_count + batch_commit.success_count,
+            failed_count=run_state.failed_count + batch_commit.failed_count,
+            skipped_count=run_state.skipped_count + batch_commit.skipped_count,
+            last_committed_batch=batch_index,
+            updated_at=utc_isoformat(),
+        )
+
+    def find_highest_manifest_batch_index(self, run_id: str) -> int:
+        highest = 0
+        for key in self.object_store.list_keys(self.build_manifests_prefix(run_id)):
+            if not key.endswith(".jsonl"):
+                continue
+            filename = key.rsplit("/", 1)[-1]
+            batch_text = filename.removeprefix("batch-").removesuffix(".jsonl")
+            if batch_text.isdigit():
+                highest = max(highest, int(batch_text))
+        return highest

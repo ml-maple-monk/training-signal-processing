@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from training_signal_processing.core.models import SshConfig
-from training_signal_processing.runtime.submission import (
+from training_signal_processing.core.submission import (
     ArtifactRef,
     ArtifactStore,
     AsyncCommandHandle,
@@ -70,7 +70,7 @@ def _spec() -> RemoteInvocationSpec:
 
 def _remote_commands(runner: RecordingCommandRunner) -> list[str]:
     """Extract the remote shell string from each SSH invocation recorded."""
-    # Each SSH invocation is `ssh -i <key> -p <port> [-R tunnel...] user@host <remote_cmd>`
+    # Each SSH invocation is `ssh -i <key> -p <port> user@host <remote_cmd>`
     # The remote command is always the last positional argument.
     return [cmd[-1] for cmd in runner.commands]
 
@@ -182,26 +182,6 @@ def test_launch_detached_refuses_heredoc_terminator_in_body() -> None:
         )
 
 
-def test_launch_detached_propagates_reverse_tunnels() -> None:
-    runner = RecordingCommandRunner()
-    transport = SshRemoteTransport(_ssh_config(), command_runner=runner)
-    spec = RemoteInvocationSpec(
-        command="echo hi",
-        env={},
-        reverse_tunnels=("15000:127.0.0.1:5000",),
-    )
-
-    transport.launch_detached(
-        remote_root="/root/app", spec=spec, run_id="20260101T000000Z"
-    )
-
-    # The start-and-wait SSH invocation should include the reverse tunnel flag.
-    start_args = runner.commands[-1]
-    assert "-R" in start_args
-    idx = start_args.index("-R")
-    assert start_args[idx + 1] == "15000:127.0.0.1:5000"
-
-
 # --------------------------------------------------------------------------
 # SubmissionCoordinator integration
 # --------------------------------------------------------------------------
@@ -248,25 +228,6 @@ class FakeRemoteTransport(RemoteTransport):
             launcher_script_path=f"/root/ocr-jobs/{run_id}/launch.sh",
         )
 
-    def ensure_reverse_tunnels(
-        self, reverse_tunnels: tuple[str, ...]
-    ) -> tuple:
-        self.calls.append("ensure_reverse_tunnels")
-        self.requested_tunnels = tuple(reverse_tunnels)
-        from training_signal_processing.runtime.reverse_tunnel import TunnelHandle
-        return tuple(
-            TunnelHandle(
-                spec=spec,
-                ssh_target="root@fake-host",
-                ssh_port=22,
-                identity_file="/tmp/k",
-                control_socket=f"/tmp/fake-{i}.sock",
-                started_fresh=True,
-            )
-            for i, spec in enumerate(reverse_tunnels)
-        )
-
-
 class FakeArtifactStore(ArtifactStore):
     bucket = "fake-bucket"
 
@@ -297,7 +258,6 @@ class FakeAdapter(SubmissionAdapter):
         self.prepared = prepared
         self.prepare_new_calls = 0
         self.prepare_resume_calls = 0
-        self.parse_summary_calls = 0
 
     def prepare_new_run(self, artifact_store: ArtifactStore, *, dry_run: bool) -> PreparedRun:
         self.prepare_new_calls += 1
@@ -308,11 +268,6 @@ class FakeAdapter(SubmissionAdapter):
     ) -> PreparedRun:
         self.prepare_resume_calls += 1
         return self.prepared
-
-    def parse_remote_summary(self, stdout: str) -> dict[str, object]:
-        self.parse_summary_calls += 1
-        return {"ok": True}
-
 
 @dataclass
 class _FakeAsyncHandle(AsyncCommandHandle):
@@ -389,8 +344,6 @@ def test_submit_launches_detached_and_returns_handle() -> None:
     assert result.launch is not None
     assert result.launch.run_id == "20260424T000000Z"
     assert result.launch.pgid_path == "/root/ocr-jobs/20260424T000000Z/job.pgid"
-    # Detached path never asks the adapter for remote summary (there is no stdout to parse).
-    assert adapter.parse_summary_calls == 0
     # The blocking `execute` must NOT be called.
     assert "execute" not in transport.calls
     assert "launch_detached" in transport.calls
@@ -436,13 +389,10 @@ def test_submit_terminates_upload_when_launch_raises() -> None:
         coord.submit(dry_run=False, resume_run_id=None)
 
     # The handle's wait() was already called before launch_detached, so termination
-    # won't fire in this path — verify the sequence is sync -> bootstrap ->
-    # ensure_reverse_tunnels -> launch_detached (the tunnel step must come
-    # before launch so the detached remote can actually reach the tunnel).
+    # won't fire in this path.
     assert transport.calls == [
         "sync",
         "bootstrap",
-        "ensure_reverse_tunnels",
         "launch_detached",
     ]
 
@@ -545,70 +495,9 @@ def test_detach_wrapper_captures_real_pgid_of_session_leader(tmp_path: Path) -> 
                 pass
 
 
-# --------------------------------------------------------------------------
-# Reverse-tunnel wiring in SubmissionCoordinator.submit
-# --------------------------------------------------------------------------
-
-
-def _prepared_run_with_tunnels(tunnels: tuple[str, ...]) -> PreparedRun:
-    return PreparedRun(
-        run_id="20260424T010000Z",
-        remote_root="/root/app",
-        sync_paths=("./src",),
-        bootstrap=BootstrapSpec(command="echo bootstrap"),
-        invocation=RemoteInvocationSpec(
-            command="echo work",
-            env={},
-            reverse_tunnels=tunnels,
-        ),
-        artifacts=(ArtifactRef(name="recipe", key="bucket/recipe.json"),),
-        discovered_items=1,
-        uploaded_items=0,
-    )
-
-
-def test_submit_calls_ensure_reverse_tunnels_before_launch_and_returns_handles() -> None:
+def test_submit_payload_has_no_reverse_tunnel_fields() -> None:
     transport = FakeRemoteTransport()
-    adapter = FakeAdapter(
-        _prepared_run_with_tunnels(("15000:127.0.0.1:5000", "18888:127.0.0.1:8888"))
-    )
-    coord = SubmissionCoordinator(
-        adapter=adapter,
-        artifact_store=FakeArtifactStore(),
-        remote_transport=transport,
-        async_command_runner=_FakeAsyncRunner(),
-    )
-
-    result = coord.submit(dry_run=False, resume_run_id=None)
-
-    # Tunnels are ensured BEFORE launch — if the launch SSH closed first, the
-    # -R tunnels inside it would die before the pod could use them.
-    launch_idx = transport.calls.index("launch_detached")
-    tunnels_idx = transport.calls.index("ensure_reverse_tunnels")
-    assert tunnels_idx < launch_idx
-
-    # The same specs from the invocation reached the transport.
-    assert transport.requested_tunnels == (
-        "15000:127.0.0.1:5000",
-        "18888:127.0.0.1:8888",
-    )
-
-    # The SubmissionResult surfaces tunnel handles, in order.
-    assert len(result.tunnels) == 2
-    assert [t.spec for t in result.tunnels] == [
-        "15000:127.0.0.1:5000",
-        "18888:127.0.0.1:8888",
-    ]
-
-    # And they appear in the safe dict so the CLI prints them.
-    safe = result.to_safe_dict()
-    assert "tunnels" in safe
-    assert len(safe["tunnels"]) == 2
-
-
-def test_submit_without_tunnels_still_works_and_leaves_tunnels_empty() -> None:
-    transport = FakeRemoteTransport()
-    adapter = FakeAdapter(_prepared_run_with_tunnels(()))
+    adapter = FakeAdapter(_prepared_run(with_upload=False))
     coord = SubmissionCoordinator(
         adapter=adapter,
         artifact_store=FakeArtifactStore(),
@@ -619,11 +508,6 @@ def test_submit_without_tunnels_still_works_and_leaves_tunnels_empty() -> None:
     result = coord.submit(dry_run=False, resume_run_id=None)
 
     assert result.mode == "launched"
-    assert result.tunnels == ()
-    # ensure_reverse_tunnels is still called (it is part of the flow), but the
-    # fake records every call; with no specs it returns an empty tuple.
-    assert "ensure_reverse_tunnels" in transport.calls
-    assert transport.requested_tunnels == ()
-    # "tunnels" key absent from safe dict when empty (keeps the payload lean).
     safe = result.to_safe_dict()
     assert "tunnels" not in safe
+    assert "reverse_tunnels" not in safe["plan"]

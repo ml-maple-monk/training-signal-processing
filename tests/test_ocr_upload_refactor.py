@@ -5,13 +5,7 @@ from pathlib import Path
 import pytest
 
 from training_signal_processing.core.models import OpRuntimeContext
-from training_signal_processing.custom_ops import user_ops
-from training_signal_processing.pipelines.ocr import config as ocr_config
-from training_signal_processing.pipelines.ocr.config import load_recipe_config
-from training_signal_processing.pipelines.ocr.exporter import OcrMarkdownExporter
-from training_signal_processing.pipelines.ocr.models import PdfTask
-from training_signal_processing.pipelines.ocr.submission import OcrSubmissionAdapter
-from training_signal_processing.runtime.submission import (
+from training_signal_processing.core.submission import (
     ArtifactStore,
     AsyncCommandHandle,
     AsyncCommandRunner,
@@ -25,6 +19,12 @@ from training_signal_processing.runtime.submission import (
     SubmissionAdapter,
     SubmissionCoordinator,
 )
+from training_signal_processing.pipelines.ocr import config as ocr_config
+from training_signal_processing.pipelines.ocr import ops as ocr_ops
+from training_signal_processing.pipelines.ocr.config import load_recipe_config
+from training_signal_processing.pipelines.ocr.exporter import OcrMarkdownExporter
+from training_signal_processing.pipelines.ocr.models import PdfTask
+from training_signal_processing.pipelines.ocr.submission import OcrSubmissionAdapter
 
 
 class FakeArtifactStore(ArtifactStore):
@@ -149,9 +149,6 @@ class FakeSubmissionAdapter(SubmissionAdapter):
     def prepare_resume_run(self, artifact_store: ArtifactStore, run_id: str) -> PreparedRun:
         return self.prepared_run
 
-    def parse_remote_summary(self, stdout: str) -> dict[str, object]:
-        return {"status": "success"}
-
 
 @pytest.fixture()
 def ocr_upload_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -206,8 +203,7 @@ input:
   max_files: 2
 mlflow:
   enabled: false
-  local_tracking_uri: http://127.0.0.1:5000
-  remote_tunnel_port: 15000
+  tracking_uri: ""
   experiment_name: x
 observability:
   flush_interval_sec: 5
@@ -440,7 +436,7 @@ def build_prepared_ocr_row(runtime_context: OpRuntimeContext) -> dict[str, objec
         source_page_count=1,
         source_sha256="abc123",
     )
-    return user_ops.PreparePdfDocumentOp().bind_runtime(runtime_context).process_row(task.to_dict())
+    return ocr_ops.PreparePdfDocumentOp().bind_runtime(runtime_context).process_row(task.to_dict())
 
 
 def test_prepare_pdf_document_uses_flat_markdown_key(
@@ -454,7 +450,7 @@ def test_prepare_pdf_document_uses_flat_markdown_key(
         source_sha256="abc123",
     )
 
-    row = user_ops.PreparePdfDocumentOp().bind_runtime(ocr_runtime_context).process_row(
+    row = ocr_ops.PreparePdfDocumentOp().bind_runtime(ocr_runtime_context).process_row(
         task.to_dict()
     )
 
@@ -469,7 +465,7 @@ def test_marker_ocr_process_row_success(
     ocr_runtime_context: OpRuntimeContext,
 ) -> None:
     row = build_prepared_ocr_row(ocr_runtime_context)
-    op = user_ops.MarkerOcrDocumentOp(force_ocr=True).bind_runtime(ocr_runtime_context)
+    op = ocr_ops.MarkerOcrDocumentOp(force_ocr=True).bind_runtime(ocr_runtime_context)
     monkeypatch.setattr(
         op,
         "convert_pdf_file",
@@ -489,7 +485,7 @@ def test_marker_ocr_process_row_failure(
     ocr_runtime_context: OpRuntimeContext,
 ) -> None:
     row = build_prepared_ocr_row(ocr_runtime_context)
-    op = user_ops.MarkerOcrDocumentOp(force_ocr=True).bind_runtime(ocr_runtime_context)
+    op = ocr_ops.MarkerOcrDocumentOp(force_ocr=True).bind_runtime(ocr_runtime_context)
 
     def raise_error(pdf_path: Path, timeout_sec: int) -> tuple[str, dict[str, object]]:
         raise RuntimeError("converter exploded")
@@ -508,7 +504,7 @@ def test_marker_ocr_process_row_timeout(
     ocr_runtime_context: OpRuntimeContext,
 ) -> None:
     row = build_prepared_ocr_row(ocr_runtime_context)
-    op = user_ops.MarkerOcrDocumentOp(force_ocr=True).bind_runtime(ocr_runtime_context)
+    op = ocr_ops.MarkerOcrDocumentOp(force_ocr=True).bind_runtime(ocr_runtime_context)
 
     def raise_timeout(pdf_path: Path, timeout_sec: int) -> tuple[str, dict[str, object]]:
         raise TimeoutError("Marker OCR conversion timed out after 300 seconds.")
@@ -595,9 +591,9 @@ def test_convert_pdf_bytes_with_timeout_uses_spawn_context(monkeypatch: pytest.M
         def Process(self, *, target, args) -> FakeProcess:
             return FakeProcess(target=target, args=args)
 
-    monkeypatch.setattr(user_ops, "get_marker_mp_context", lambda: FakeContext())
+    monkeypatch.setattr(ocr_ops, "get_marker_mp_context", lambda: FakeContext())
 
-    markdown_text, diagnostics = user_ops.convert_pdf_bytes_with_timeout(
+    markdown_text, diagnostics = ocr_ops.convert_pdf_bytes_with_timeout(
         b"%PDF-fake",
         {"force_ocr": True, "timeout_sec": 5},
     )
@@ -621,9 +617,9 @@ def test_wait_for_source_object_polls_until_available(monkeypatch: pytest.Monkey
             calls["count"] += 1
             return calls["count"] >= 3
 
-    monkeypatch.setattr(user_ops, "sleep", lambda seconds: sleep_calls.append(seconds))
+    monkeypatch.setattr(ocr_ops, "sleep", lambda seconds: sleep_calls.append(seconds))
 
-    user_ops.wait_for_source_object(
+    ocr_ops.wait_for_source_object(
         FakeObjectStore(),
         key="dataset/raw/pdf/example.pdf",
         timeout_sec=5,
@@ -639,11 +635,11 @@ def test_wait_for_source_object_times_out(monkeypatch: pytest.MonkeyPatch) -> No
             return False
 
     times = iter([0.0, 0.0, 0.5, 0.5, 1.1, 1.1])
-    monkeypatch.setattr(user_ops, "perf_counter", lambda: next(times))
-    monkeypatch.setattr(user_ops, "sleep", lambda seconds: None)
+    monkeypatch.setattr(ocr_ops, "perf_counter", lambda: next(times))
+    monkeypatch.setattr(ocr_ops, "sleep", lambda seconds: None)
 
     with pytest.raises(TimeoutError, match="did not appear"):
-        user_ops.wait_for_source_object(
+        ocr_ops.wait_for_source_object(
             FakeObjectStore(),
             key="dataset/raw/pdf/example.pdf",
             timeout_sec=1,

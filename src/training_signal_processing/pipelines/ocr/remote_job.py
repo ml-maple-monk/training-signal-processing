@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from ...core.models import RuntimeRunBindings
-from ...runtime.remote_job import build_remote_job_cli
-from ...storage.object_store import R2ObjectStore
+from ...core.remote import build_remote_job_cli
+from ...core.storage import R2ObjectStore
 from .config import build_recipe_config
 from .models import RecipeConfig
 from .runtime import OcrPipelineRuntimeAdapter
 
 
-def _build_adapter(
+def build_adapter(
     config: RecipeConfig,
     bindings: RuntimeRunBindings,
     object_store: R2ObjectStore,
@@ -22,7 +22,7 @@ def _build_adapter(
 
 cli = build_remote_job_cli(
     recipe_loader=build_recipe_config,
-    adapter_factory=_build_adapter,
+    adapter_factory=build_adapter,
 )
 
 

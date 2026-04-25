@@ -11,7 +11,7 @@ Companion docs:
   workflow guardrails, MLflow verification snippets.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — layers, contracts,
   frozen-file invariants, OCR walkthrough with diagrams.
-- [src/training_signal_processing/custom_ops/README.md](src/training_signal_processing/custom_ops/README.md)
+- [EXTENDING.md](EXTENDING.md)
   — pre-existing op-authoring guide.
 
 ---
@@ -255,18 +255,15 @@ override `ssh.host` / `ssh.port` in the recipe.
       --group model --frozen`.
    4. Local: rclone starts the parallel PDF upload to R2 in
       background.
-   5. Local: `ensure_reverse_tunnels` spawns a persistent
-      `ssh -fN -o ControlMaster=yes` for every declared `-R` tunnel
-      (e.g. MLflow at `15000:127.0.0.1:5000`). The ControlMaster
-      socket outlives the launcher SSH so the detached remote can
-      keep using it.
+   5. Local: wait for the source upload to finish so the detached
+      remote never races ahead of its R2 inputs.
    6. Local: `launch_detached` SSHes to the pod, writes a
       `launch.sh` under `/root/ocr-jobs/<run_id>/`, and spawns it
       under `setsid`. The session leader records its own pgid in
       `.../job.pgid` before exec'ing the launcher. Remote stdout
       goes to `.../job.log`. The local CLI then prints a
-      `LaunchHandle` + `TunnelHandle` JSON and exits. **Exit code
-      0 means *launched successfully*, not *run complete*** — check
+      `LaunchHandle` JSON and exits. **Exit code 0 means
+      *launched successfully*, not *run complete*** — check
       completion by reading `run_state.json` from R2 or tailing the
       remote log.
    7. Remote: `uv run python -m ...main ocr-remote-job …` runs
@@ -299,7 +296,7 @@ override `ssh.host` / `ssh.port` in the recipe.
      --config src/training_signal_processing/pipelines/ocr/configs/baseline.yaml \
      --run-id 20260423T132754Z
    ```
-   The `OcrResumeLedger.load_completed_item_keys` reads all prior
+   The `OcrCheckpointStore.load_completed_item_keys` reads all prior
    batch manifests and feeds them to `SkipExistingDocumentsOp`, so
    already-successful PDFs are filtered out without being reprocessed.
 
@@ -356,9 +353,11 @@ reference template.
 
 TL;DR:
 
-- Create `pipelines/<new>/` (8 files) + `custom_ops/<new>_ops.py`.
-- Ops self-register at import. Filenames starting with `_` are
-  skipped. `op_name` is globally unique across all pipelines.
+- Create `pipelines/<new>/` with `models.py`, `config.py`, `ops.py`,
+  `runtime.py`, `exporter.py`, `resume.py`, `submission.py`, `remote_job.py`,
+  `cli.py`, and configs.
+- Ops self-register when `pipelines/<new>/__init__.py` imports `ops.py`.
+  `op_name` is globally unique across imported pipeline ops.
 - `main.py` is frozen; each new pipeline gets its own `cli.py` +
   `remote_job.py` — mirror
   [pipelines/youtube_asr/cli.py](src/training_signal_processing/pipelines/youtube_asr/cli.py)
@@ -442,13 +441,10 @@ Only errors the code actually raises, with the fix for each.
   Adjust `remote.python_version` in your recipe only as a last
   resort.
 
-- **`custom_ops` module added but `validate` reports "no op
-  registered for name X"**
-  Either the filename starts with `_` (skipped by the sweep at
-  [custom_ops/__init__.py:13](src/training_signal_processing/custom_ops/__init__.py#L13))
-  or the class's `op_name` attribute doesn't match the recipe's
-  `ops:` entry.
-  *Fix:* rename the file to drop the underscore prefix, or correct
+- **`ops.py` added but `validate` reports "no op registered for name X"**
+  Either `pipelines/<new>/__init__.py` is not importing `ops.py`, or the
+  class's `op_name` attribute doesn't match the recipe's `ops:` entry.
+  *Fix:* import `ops.py` from the package `__init__.py`, or correct
   the `op_name` typo.
 
 <!-- TRANSITIONAL: remove this subsection when ocr-remote CLI lands in PR #2b. Grep anchor: OPERATOR_RUNBOOK_MANUAL_SSH -->
@@ -479,27 +475,9 @@ uploader together:
 ssh <pod> 'p=$(cat /root/ocr-jobs/<run_id>/job.pgid); kill -TERM -$p; sleep 10; kill -KILL -$p 2>/dev/null || true'
 ```
 
-**Tunnel troubleshooting.** ControlMaster sockets for the
-framework-managed reverse tunnels live at
-`~/.cache/ocr-remote-launcher/tunnels/t-<hash>.sock` on the local
-machine.
-
-- Check a tunnel is alive:
-  ```
-  ssh -S ~/.cache/ocr-remote-launcher/tunnels/t-<hash>.sock -O check <ssh_target>
-  ```
-  Expect `Master running (pid=…)`.
-- Manual teardown if the socket is stale:
-  ```
-  ssh -S <sock> -O exit <ssh_target>
-  rm <sock>
-  ```
-- `run` / `resume` re-creates the tunnel automatically on the next
-  launch via `ensure_reverse_tunnels`; you should not need to start
-  one by hand.
-
-> When PR #2b lands, delete this subsection and replace with a
-> pointer to the `ocr-remote` CLI reference.
+**Progress.** MLflow is no longer forwarded through SSH. Use R2
+`run_state.json`, batch manifests, and event objects for progress;
+enable MLflow only with a directly reachable `mlflow.tracking_uri`.
 <!-- /TRANSITIONAL -->
 
 ---
@@ -510,8 +488,8 @@ machine.
   verification snippets.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — full layered architecture,
   ABC contracts, and the OCR end-to-end walkthrough with diagrams.
-- [src/training_signal_processing/custom_ops/README.md](src/training_signal_processing/custom_ops/README.md)
-  — deeper op-authoring guide and stage-template reference.
+- [EXTENDING.md](EXTENDING.md)
+  — op-authoring guide and stage-template reference.
 - [pyproject.toml](pyproject.toml) — dependency groups
   (`[dependency-groups]`) and the import-linter contract
   (`[tool.importlinter]`).

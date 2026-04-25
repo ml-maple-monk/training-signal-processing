@@ -36,10 +36,6 @@ ray:
   marker_ocr_resources:
     num_gpus: 0.5
     num_cpus: 3
-  async_upload:
-    enabled: true
-    max_in_flight: 8
-    max_queued: 32
 
 r2:
   config_file: r2
@@ -52,9 +48,8 @@ input:
   include_glob: "**/*.pdf"
 
 mlflow:
-  enabled: true
-  local_tracking_uri: http://127.0.0.1:5000
-  remote_tunnel_port: 15000
+  enabled: false
+  tracking_uri: ""
   experiment_name: remote-pdf-ocr
 
 observability:

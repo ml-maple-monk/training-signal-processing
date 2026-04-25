@@ -1,34 +1,33 @@
 from __future__ import annotations
 
 import multiprocessing as mp
-from hashlib import sha256
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from time import perf_counter, sleep
 
-from ..core.models import ExecutionLogEvent
-from ..core.utils import join_s3_key, utc_isoformat
-from ..ops.base import Batch
-from ..ops.builtin import (
+from ...core.models import ExecutionLogEvent
+from ...core.utils import utc_isoformat
+from ...ops.base import Batch
+from ...ops.builtin import (
     BatchTransformOp,
     ExportMarkdownMapper,
     MarkerOcrMapper,
     SkipExistingFilter,
     SourcePreparationOp,
 )
-from ..pipelines.ocr.models import PdfTask
+from .models import PdfTask, build_markdown_r2_key
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
 
 """
-ADD NEW CONCRETE USER OPS TO THIS FILE OR TO ANOTHER MODULE IN THIS DIRECTORY.
+ADD NEW CONCRETE OCR OPS TO THIS FILE OR TO ANOTHER MODULE IN THIS PACKAGE.
 
 Design contract:
-- Define one concrete subclass per user-customized op.
+- Define one concrete subclass per OCR pipeline op.
 - Set `op_name` so the class auto-registers on import.
 - Inherit from `SourcePreparationOp`, `BatchTransformOp`, `SkipExistingFilter`,
   or `ExportMarkdownMapper` so the executor can infer the stage automatically.
-- The user should only need to modify files in `custom_ops/` and the YAML recipe
+- The pipeline owner should only need to modify this package and the YAML recipe
   to add a new op.
 """
 
@@ -211,14 +210,16 @@ class PreparePdfDocumentOp(SourcePreparationOp):
     def process_row(self, row: dict[str, object]) -> dict[str, object]:
         runtime = self.require_runtime()
         task = PdfTask.from_dict(row)
-        markdown_name = build_flat_markdown_name(task.relative_path)
         return {
             "run_id": runtime.run_id,
             "source_r2_key": task.source_r2_key,
             "relative_path": task.relative_path,
             "source_size_bytes": task.source_size_bytes,
             "source_sha256": task.source_sha256,
-            "markdown_r2_key": join_s3_key(runtime.output_root_key, f"markdown/{markdown_name}"),
+            "markdown_r2_key": build_markdown_r2_key(
+                runtime.output_root_key,
+                task.relative_path,
+            ),
             "status": "pending",
             "error_message": "",
             "started_at": "",
@@ -227,12 +228,6 @@ class PreparePdfDocumentOp(SourcePreparationOp):
             "marker_exit_code": 0,
             "markdown_text": "",
         }
-
-
-def build_flat_markdown_name(relative_path: str) -> str:
-    source_name = Path(relative_path).with_suffix(".md").name
-    path_digest = sha256(relative_path.encode("utf-8")).hexdigest()[:16]
-    return f"{path_digest}-{source_name}"
 
 
 class SkipExistingDocumentsOp(SkipExistingFilter):

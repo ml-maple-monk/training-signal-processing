@@ -9,11 +9,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..core.models import R2Config, SshConfig
-from .reverse_tunnel import TunnelHandle, ensure_reverse_tunnels
+from .models import R2Config, SshConfig
+from .storage import build_r2_env
 
 if TYPE_CHECKING:
-    from ..storage.object_store import R2ObjectStore
+    from .storage import R2ObjectStore
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
 
@@ -54,20 +54,17 @@ class BootstrapSpec:
 class RemoteInvocationSpec:
     command: str
     env: dict[str, str] = field(default_factory=dict)
-    reverse_tunnels: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
             "command": self.command,
             "env": dict(self.env),
-            "reverse_tunnels": list(self.reverse_tunnels),
         }
 
     def to_safe_dict(self) -> dict[str, object]:
         return {
             "command": "<redacted remote command>",
             "env_keys": sorted(self.env),
-            "reverse_tunnels": list(self.reverse_tunnels),
         }
 
 
@@ -164,7 +161,6 @@ class SubmissionResult:
     transport_details: dict[str, object] = field(default_factory=dict)
     remote_summary: dict[str, object] = field(default_factory=dict)
     launch: LaunchHandle | None = None
-    tunnels: tuple[TunnelHandle, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         payload = {
@@ -176,8 +172,6 @@ class SubmissionResult:
             payload["remote_summary"] = dict(self.remote_summary)
         if self.launch is not None:
             payload["launch"] = self.launch.to_dict()
-        if self.tunnels:
-            payload["tunnels"] = [t.to_dict() for t in self.tunnels]
         return payload
 
     def to_safe_dict(self) -> dict[str, object]:
@@ -200,8 +194,6 @@ class SubmissionResult:
             "is_resume": self.prepared_run.is_resume,
             **self.transport_details,
         }
-        if self.prepared_run.invocation.reverse_tunnels:
-            plan_payload["reverse_tunnels"] = list(self.prepared_run.invocation.reverse_tunnels)
         base: dict[str, object] = {
             "mode": self.mode,
             "artifacts": artifacts_payload,
@@ -211,8 +203,6 @@ class SubmissionResult:
             base["remote_summary"] = dict(self.remote_summary)
         if self.launch is not None:
             base["launch"] = self.launch.to_dict()
-        if self.tunnels:
-            base["tunnels"] = [t.to_dict() for t in self.tunnels]
         return base
 
 
@@ -360,13 +350,13 @@ class R2ArtifactStore(ArtifactStore):
 
     @classmethod
     def from_config_file(cls, config: R2Config) -> "R2ArtifactStore":
-        from ..storage.object_store import R2ObjectStore
+        from .storage import R2ObjectStore
 
         return cls(R2ObjectStore.from_config_file(config))
 
     @classmethod
     def from_environment(cls, config: R2Config) -> "R2ArtifactStore":
-        from ..storage.object_store import R2ObjectStore
+        from .storage import R2ObjectStore
 
         return cls(R2ObjectStore.from_environment(config))
 
@@ -392,17 +382,7 @@ class R2ArtifactStore(ArtifactStore):
         self.object_store.upload_file(path, key)
 
     def build_remote_env(self) -> dict[str, str]:
-        return {
-            "R2_BUCKET": self.object_store.bucket,
-            "R2_ACCESS_KEY_ID": self.object_store.config.access_key_id,
-            "R2_SECRET_ACCESS_KEY": self.object_store.config.secret_access_key,
-            "R2_REGION": self.object_store.config.region,
-            "R2_ENDPOINT_URL": self.object_store.config.endpoint_url,
-            "AWS_ACCESS_KEY_ID": self.object_store.config.access_key_id,
-            "AWS_SECRET_ACCESS_KEY": self.object_store.config.secret_access_key,
-            "AWS_DEFAULT_REGION": self.object_store.config.region,
-            "MLFLOW_S3_ENDPOINT_URL": self.object_store.config.endpoint_url,
-        }
+        return build_r2_env(self.object_store.config)
 
 
 class RemoteTransport(ABC):
@@ -431,12 +411,6 @@ class RemoteTransport(ABC):
         run_id: str,
     ) -> LaunchHandle:
         raise NotImplementedError
-
-    def ensure_reverse_tunnels(
-        self, reverse_tunnels: tuple[str, ...]
-    ) -> tuple[TunnelHandle, ...]:
-        """Default: transport has no tunnel concept. SSH overrides this."""
-        return ()
 
 
 class SshRemoteTransport(RemoteTransport):
@@ -483,8 +457,7 @@ class SshRemoteTransport(RemoteTransport):
                 remote_root=remote_root,
                 command=spec.command,
                 env=spec.env,
-            ),
-            reverse_tunnels=spec.reverse_tunnels,
+            )
         )
 
     REMOTE_JOBS_ROOT = "/root/ocr-jobs"
@@ -534,7 +507,6 @@ class SshRemoteTransport(RemoteTransport):
             launcher_path=launcher_path,
             log_path=log_path,
             pgid_path=pgid_path,
-            reverse_tunnels=spec.reverse_tunnels,
         )
 
         return LaunchHandle(
@@ -586,7 +558,6 @@ class SshRemoteTransport(RemoteTransport):
         launcher_path: str,
         log_path: str,
         pgid_path: str,
-        reverse_tunnels: tuple[str, ...],
     ) -> None:
         inner = (
             f"exec >{shlex.quote(log_path)} 2>&1 </dev/null; "
@@ -604,17 +575,7 @@ class SshRemoteTransport(RemoteTransport):
             f"echo 'pgid file not written within {self.PGID_WAIT_ATTEMPTS} attempts' >&2; "
             f"exit 1"
         )
-        self._run_remote_shell(f"{start_command} {wait_command}", reverse_tunnels=reverse_tunnels)
-
-    def ensure_reverse_tunnels(
-        self, reverse_tunnels: tuple[str, ...]
-    ) -> tuple[TunnelHandle, ...]:
-        """Spawn (or reuse) a persistent `ssh -fN` for each reverse tunnel spec.
-
-        Delegates to `runtime.reverse_tunnel.ensure_reverse_tunnels` which uses
-        ControlMaster sockets for idempotent tunnel management.
-        """
-        return ensure_reverse_tunnels(self.ssh_config, reverse_tunnels)
+        self._run_remote_shell(f"{start_command} {wait_command}")
 
     def build_ssh_target(self) -> str:
         return f"{self.ssh_config.user}@{self.ssh_config.host}"
@@ -644,8 +605,6 @@ class SshRemoteTransport(RemoteTransport):
     def _run_remote_shell(
         self,
         remote_command: str,
-        *,
-        reverse_tunnels: tuple[str, ...] = (),
     ) -> CommandOutput:
         command = [
             "ssh",
@@ -654,8 +613,6 @@ class SshRemoteTransport(RemoteTransport):
             "-p",
             str(self.ssh_config.port),
         ]
-        for tunnel in reverse_tunnels:
-            command.extend(["-R", tunnel])
         command.extend([self.build_ssh_target(), remote_command])
         return self.command_runner.run(command)
 
@@ -668,11 +625,6 @@ class SubmissionAdapter(ABC):
     @abstractmethod
     def prepare_resume_run(self, artifact_store: ArtifactStore, run_id: str) -> PreparedRun:
         raise NotImplementedError
-
-    @abstractmethod
-    def parse_remote_summary(self, stdout: str) -> dict[str, object]:
-        raise NotImplementedError
-
 
 class SubmissionCoordinator:
     def __init__(
@@ -732,13 +684,6 @@ class SubmissionCoordinator:
             # detached remote launcher fixes.
             if upload_handle is not None:
                 upload_handle.wait()
-            # Spin up persistent reverse tunnels (if any) BEFORE the detached
-            # launch. The launch SSH closes as soon as setsid spawns; without
-            # this, any `-R` tunnel dies with it and the remote wedges on
-            # connect() to 127.0.0.1:<port>.
-            tunnel_handles = self.remote_transport.ensure_reverse_tunnels(
-                prepared_run.invocation.reverse_tunnels
-            )
             launch_handle = self.remote_transport.launch_detached(
                 remote_root=prepared_run.remote_root,
                 spec=prepared_run.invocation,
@@ -748,7 +693,6 @@ class SubmissionCoordinator:
                 mode="launched",
                 prepared_run=prepared_run,
                 transport_details=transport_details,
-                tunnels=tunnel_handles,
                 launch=launch_handle,
             )
         except Exception:
@@ -769,3 +713,27 @@ class SubmissionCoordinator:
                 Path(raw_path).unlink(missing_ok=True)
             except OSError:
                 continue
+
+
+__all__ = [
+    "ArtifactRef",
+    "ArtifactStore",
+    "AsyncCommandHandle",
+    "AsyncCommandRunner",
+    "BootstrapSpec",
+    "CommandOutput",
+    "CommandRunner",
+    "LaunchHandle",
+    "LocalAsyncUploadSpec",
+    "PreparedRun",
+    "R2ArtifactStore",
+    "RemoteInvocationSpec",
+    "RemoteTransport",
+    "SshRemoteTransport",
+    "SubmissionAdapter",
+    "SubmissionCoordinator",
+    "SubmissionResult",
+    "SubprocessAsyncCommandHandle",
+    "SubprocessAsyncCommandRunner",
+    "SubprocessCommandRunner",
+]

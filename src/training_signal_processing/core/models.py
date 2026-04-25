@@ -22,19 +22,11 @@ class RemoteRuntimeConfig:
 
 
 @dataclass
-class AsyncUploadConfig:
-    enabled: bool = True
-    max_in_flight: int = 8
-    max_queued: int = 32
-
-
-@dataclass
 class RayConfig:
     executor_type: str
     batch_size: int
     concurrency: int
     target_num_blocks: int
-    async_upload: AsyncUploadConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -61,9 +53,8 @@ class R2Config:
 @dataclass
 class MlflowConfig:
     enabled: bool
-    local_tracking_uri: str
-    remote_tunnel_port: int
     experiment_name: str
+    tracking_uri: str = ""
 
 
 @dataclass
@@ -263,7 +254,7 @@ class OpRuntimeContext:
             return self.object_store
         import os
 
-        from ..storage.object_store import R2ObjectStore
+        from .storage import R2ObjectStore
 
         if os.environ.get("R2_ACCESS_KEY_ID"):
             self.object_store = R2ObjectStore.from_environment(self.config.r2)

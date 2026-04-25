@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 import fnmatch
-import json
 import shlex
 from pathlib import Path
-from urllib.parse import urlparse
 
-from ...core.utils import join_s3_key, make_s3_url, utc_timestamp
-from ...runtime.submission import (
+from ...core.submission import (
     ArtifactRef,
     ArtifactStore,
     BootstrapSpec,
@@ -16,6 +13,7 @@ from ...runtime.submission import (
     RemoteInvocationSpec,
     SubmissionAdapter,
 )
+from ...core.utils import join_s3_key, make_s3_url, utc_timestamp
 from .config import load_resolved_recipe_mapping
 from .models import ParquetFamilySpec, ParquetShardTask, RecipeConfig
 
@@ -78,12 +76,6 @@ class TokenizerSubmissionAdapter(SubmissionAdapter):
             discovered_items=len(manifest_rows),
             is_resume=True,
         )
-
-    def parse_remote_summary(self, stdout: str) -> dict[str, object]:
-        stripped = stdout.strip()
-        if not stripped:
-            raise ValueError("Remote job returned no JSON summary on stdout.")
-        return json.loads(stripped)
 
     def build_prepared_run(
         self,
@@ -158,27 +150,7 @@ class TokenizerSubmissionAdapter(SubmissionAdapter):
             ]
         )
         env = artifact_store.build_remote_env()
-        reverse_tunnels: tuple[str, ...] = ()
-        tracking_uri = self.resolve_remote_tracking_uri()
-        if tracking_uri:
-            env["MLFLOW_TRACKING_URI"] = tracking_uri
-            reverse_tunnels = (self.build_reverse_tunnel_spec(),)
-        return RemoteInvocationSpec(
-            command=command,
-            env=env,
-            reverse_tunnels=reverse_tunnels,
-        )
-
-    def resolve_remote_tracking_uri(self) -> str:
-        if not self.config.mlflow.enabled:
-            return ""
-        return f"http://127.0.0.1:{self.config.mlflow.remote_tunnel_port}"
-
-    def build_reverse_tunnel_spec(self) -> str:
-        parsed = urlparse(self.config.mlflow.local_tracking_uri)
-        if not parsed.hostname or not parsed.port:
-            raise ValueError("mlflow.local_tracking_uri must include an explicit host and port.")
-        return f"{self.config.mlflow.remote_tunnel_port}:{parsed.hostname}:{parsed.port}"
+        return RemoteInvocationSpec(command=command, env=env)
 
     def discover_shard_tasks(
         self,

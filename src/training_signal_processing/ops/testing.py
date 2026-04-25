@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from ..core.models import ExecutionLogEvent, OpTestResult
-from ..runtime.dataset import (
+from ..core.dataset import (
     DatasetBuilder,
     DatasetHandle,
     LocalRayDatasetBuilder,
     RayDatasetHandle,
 )
-from ..runtime.observability import ExecutionLogger, StructuredExecutionLogger
+from ..core.models import ExecutionLogEvent, OpTestResult
+from ..core.observability import ExecutionLogger, StructuredExecutionLogger
 from .base import Batch, Op
 from .registry import ResolvedOpPipeline
 

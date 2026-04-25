@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any
 
-from ..core.models import (
+from ..ops.base import Batch, Op
+from ..ops.registry import OpRegistry
+from .checkpoint import CheckpointStore
+from .dataset import ConfiguredRayDatasetBuilder, DatasetBuilder
+from .exporter import Exporter
+from .models import (
     ExecutionLogEvent,
     ExecutorRunSummary,
     OpConfig,
@@ -16,13 +21,6 @@ from ..core.models import (
     RuntimeRunBindings,
     RuntimeTrackingContext,
 )
-from ..core.utils import utc_isoformat
-from ..ops.base import Batch, Op
-from ..ops.registry import OpRegistry
-from ..storage.object_store import R2ObjectStore
-from .async_upload_coordinator import AsyncUploadCoordinator
-from .dataset import ConfiguredRayDatasetBuilder, DatasetBuilder
-from .exporter import Exporter, RayExporter
 from .observability import (
     ExecutionLogger,
     MlflowExecutionLogger,
@@ -34,7 +32,7 @@ from .observability import (
     StructuredTracer,
     TqdmProgressReporter,
 )
-from .resume import ResumeLedger
+from .utils import utc_isoformat
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
 
@@ -47,6 +45,15 @@ class Executor(ABC):
     @abstractmethod
     def run(self) -> dict[str, object]:
         raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class RunSpec:
+    bindings: RuntimeRunBindings
+    execution: RayConfig
+    tracking: RuntimeTrackingContext
+    artifact_layout: RunArtifactLayout
+    op_configs: list[OpConfig]
 
 
 class PipelineRuntimeAdapter(ABC):
@@ -92,13 +99,27 @@ class PipelineRuntimeAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def build_resume_ledger(self) -> ResumeLedger:
+    def build_resume_ledger(self) -> CheckpointStore:
         raise NotImplementedError
 
     def build_dataset_builder(self) -> DatasetBuilder:
         return ConfiguredRayDatasetBuilder(self.get_execution_config())
 
-    def resolve_completed_item_keys(self, completed_item_keys: set[str]) -> set[str]:
+    def run_spec(self) -> RunSpec:
+        return RunSpec(
+            bindings=self.get_run_bindings(),
+            execution=self.get_execution_config(),
+            tracking=self.get_tracking_context(),
+            artifact_layout=self.get_artifact_layout(),
+            op_configs=self.get_op_configs(),
+        )
+
+    def resolve_completed_item_keys(
+        self,
+        *,
+        input_rows: list[dict[str, Any]],
+        completed_item_keys: set[str],
+    ) -> set[str]:
         return completed_item_keys
 
     def resolve_transform_resources(
@@ -115,11 +136,12 @@ class StreamingRayExecutor(Executor):
         self.pipeline = pipeline
 
     def run(self) -> dict[str, object]:
-        bindings = self.pipeline.get_run_bindings()
-        execution = self.pipeline.get_execution_config()
-        tracking = self.pipeline.get_tracking_context()
-        artifact_layout = self.pipeline.get_artifact_layout()
-        op_configs = self.pipeline.get_op_configs()
+        run_spec = self.pipeline.run_spec()
+        bindings = run_spec.bindings
+        execution = run_spec.execution
+        tracking = run_spec.tracking
+        artifact_layout = run_spec.artifact_layout
+        op_configs = run_spec.op_configs
         self.validate_contract(
             bindings=bindings,
             execution=execution,
@@ -134,6 +156,10 @@ class StreamingRayExecutor(Executor):
             run_id=bindings.run_id,
             logger=logger,
         )
+        input_rows = self.pipeline.load_input_rows()
+        if not input_rows:
+            raise PipelineContractError("Pipeline adapter returned zero input rows.")
+
         resume_ledger = self.pipeline.build_resume_ledger()
         raw_completed_item_keys = resume_ledger.load_completed_item_keys(bindings.run_id)
         logger.log_event(
@@ -142,10 +168,16 @@ class StreamingRayExecutor(Executor):
                 code="executor.manifest.loaded",
                 message="Loaded input manifest rows.",
                 run_id=bindings.run_id,
-                details={"input_manifest_key": bindings.input_manifest_key},
+                details={
+                    "input_manifest_key": bindings.input_manifest_key,
+                    "input_row_count": len(input_rows),
+                },
             )
         )
-        completed_item_keys = self.pipeline.resolve_completed_item_keys(raw_completed_item_keys)
+        completed_item_keys = self.pipeline.resolve_completed_item_keys(
+            input_rows=input_rows,
+            completed_item_keys=raw_completed_item_keys,
+        )
         logger.log_event(
             ExecutionLogEvent(
                 level="INFO",
@@ -162,16 +194,7 @@ class StreamingRayExecutor(Executor):
         registry = self.pipeline.build_op_registry(runtime_context)
         resolved_pipeline = registry.resolve_pipeline(op_configs)
         exporter = self.pipeline.build_exporter()
-        coordinator = self._build_upload_coordinator(
-            execution=execution,
-            runtime_context=runtime_context,
-        )
-        if coordinator is not None and isinstance(exporter, RayExporter):
-            exporter.upload_coordinator = coordinator
         dataset_builder = self.pipeline.build_dataset_builder()
-        input_rows = self.pipeline.load_input_rows()
-        if not input_rows:
-            raise PipelineContractError("Pipeline adapter returned zero input rows.")
 
         total_items = len(input_rows)
         pending_items = max(total_items - len(completed_item_keys), 0)
@@ -274,23 +297,6 @@ class StreamingRayExecutor(Executor):
                     reported_batch_id=export_result.batch_id,
                     reported_row_count=export_result.row_count,
                 )
-                if coordinator is not None:
-                    drain_start = time.monotonic()
-                    pre_drain_depth = coordinator.depth()
-                    coordinator.drain()
-                    logger.log_event(
-                        ExecutionLogEvent(
-                            level="INFO",
-                            code="executor.upload.drain",
-                            message=f"Drained upload coordinator for '{batch_id}'.",
-                            run_id=bindings.run_id,
-                            batch_id=batch_id,
-                            details={
-                                "depth_before_drain": pre_drain_depth,
-                                "drain_seconds": time.monotonic() - drain_start,
-                            },
-                        )
-                    )
                 batch_commit, run_state = resume_ledger.commit_batch(
                     run_state=run_state,
                     batch_index=batch_index,
@@ -311,8 +317,6 @@ class StreamingRayExecutor(Executor):
                 output_keys.extend(export_result.output_keys)
             run_state = resume_ledger.mark_run_finished(run_state)
             exporter.finalize_run(run_state)
-            if coordinator is not None:
-                coordinator.drain()
             monitor.finish_run(run_state)
             progress_tracker.log_run_finished(run_state.status)
             progress_reporter.finish_run(run_state.status)
@@ -326,17 +330,6 @@ class StreamingRayExecutor(Executor):
             ).to_dict()
         except Exception as exc:
             message = str(exc)
-            if coordinator is not None:
-                cancelled = coordinator.abort()
-                logger.log_event(
-                    ExecutionLogEvent(
-                        level="WARNING",
-                        code="executor.upload.aborted",
-                        message=f"Aborted upload coordinator: {cancelled} cancelled.",
-                        run_id=bindings.run_id,
-                        details={"cancelled_count": cancelled, "error": message},
-                    )
-                )
             run_state = resume_ledger.mark_run_failed(run_state, message)
             monitor.fail_run(run_state)
             progress_tracker.log_run_failed(message)
@@ -350,43 +343,12 @@ class StreamingRayExecutor(Executor):
                 output_keys=output_keys,
                 error_message=message,
             ).to_dict()
-        finally:
-            if coordinator is not None:
-                try:
-                    coordinator.close()
-                except Exception as close_exc:  # pragma: no cover - defensive
-                    logger.log_event(
-                        ExecutionLogEvent(
-                            level="WARNING",
-                            code="executor.upload.close_error",
-                            message=f"AsyncUploadCoordinator.close() raised: {close_exc}",
-                            run_id=bindings.run_id,
-                        )
-                    )
-
-    def _build_upload_coordinator(
-        self,
-        *,
-        execution: RayConfig,
-        runtime_context: OpRuntimeContext,
-    ) -> AsyncUploadCoordinator | None:
-        async_cfg = execution.async_upload
-        if async_cfg is None or not async_cfg.enabled:
-            return None
-        object_store = runtime_context.get_object_store()
-        if not isinstance(object_store, R2ObjectStore):
-            return None
-        return AsyncUploadCoordinator(
-            object_store=object_store,
-            max_in_flight=async_cfg.max_in_flight,
-            max_queued=async_cfg.max_queued,
-        )
 
     def transition_run_phase(
         self,
         *,
         run_state: RunState,
-        resume_ledger: ResumeLedger,
+        resume_ledger: CheckpointStore,
         logger: ExecutionLogger,
         progress_reporter: ProgressReporter,
         phase: str,
@@ -586,3 +548,12 @@ class StreamingRayExecutor(Executor):
             raise PipelineContractError(
                 "Resume ledger returned a mismatched output_row_count."
             )
+
+
+__all__ = [
+    "Executor",
+    "PipelineContractError",
+    "PipelineRuntimeAdapter",
+    "RunSpec",
+    "StreamingRayExecutor",
+]

@@ -56,9 +56,8 @@ tokenizer:
   output_compression: gzip
 
 mlflow:
-  enabled: true
-  local_tracking_uri: http://127.0.0.1:5000
-  remote_tunnel_port: 15000
+  enabled: false
+  tracking_uri: ""
   experiment_name: remote-tokenizer
 
 observability:

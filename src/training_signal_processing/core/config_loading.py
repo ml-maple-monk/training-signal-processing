@@ -7,10 +7,20 @@ from typing import Any
 
 import yaml
 
-from .models import AsyncUploadConfig, OpConfig
+from .models import MlflowConfig, OpConfig
 
 DEFAULT_CURRENT_MACHINE_PATH = (
     Path(__file__).resolve().parents[3] / "infra" / "current-machine"
+)
+REMOVED_RAY_ASYNC_UPLOAD_MESSAGE = (
+    "ray.async_upload was removed; remote output uploads are synchronous "
+    "before batch manifest commits."
+)
+REMOVED_MLFLOW_TUNNEL_MESSAGE = (
+    "Reverse-tunnel MLflow was removed; mlflow.local_tracking_uri and "
+    "mlflow.remote_tunnel_port are no longer supported. Use mlflow.tracking_uri "
+    "reachable from the logging process, or set mlflow.enabled=false and use "
+    "R2 event logs."
 )
 
 
@@ -179,13 +189,34 @@ def require_sections(raw: dict[str, Any], config_path: Path, required: list[str]
         raise ValueError(f"Recipe missing required sections in {config_path}: {joined}")
 
 
-def pop_async_upload_config(ray_raw: dict[str, Any]) -> AsyncUploadConfig | None:
-    raw_block = ray_raw.pop("async_upload", None)
-    if raw_block is None:
-        return None
-    if not isinstance(raw_block, dict):
-        raise ValueError("ray.async_upload must be a mapping")
-    return AsyncUploadConfig(**raw_block)
+def reject_removed_ray_async_upload(ray_raw: dict[str, Any]) -> None:
+    if "async_upload" in ray_raw:
+        raise ValueError(REMOVED_RAY_ASYNC_UPLOAD_MESSAGE)
+
+
+def build_mlflow_config(raw: dict[str, Any]) -> MlflowConfig:
+    removed_keys = sorted(
+        key
+        for key in ("local_tracking_uri", "remote_tunnel_port")
+        if key in raw
+    )
+    if removed_keys:
+        raise ValueError(REMOVED_MLFLOW_TUNNEL_MESSAGE)
+    enabled = bool(raw.get("enabled", False))
+    tracking_uri = str(raw.get("tracking_uri", "")).strip()
+    if enabled and not tracking_uri:
+        raise ValueError(
+            "mlflow.tracking_uri is required when mlflow.enabled=true; "
+            "reverse-tunnel MLflow was removed."
+        )
+    experiment_name = str(raw.get("experiment_name", "")).strip()
+    if not experiment_name:
+        raise ValueError("mlflow.experiment_name must be non-empty")
+    return MlflowConfig(
+        enabled=enabled,
+        tracking_uri=tracking_uri,
+        experiment_name=experiment_name,
+    )
 
 
 def build_op_config(raw: dict[str, Any]) -> OpConfig:
@@ -201,6 +232,7 @@ def build_op_config(raw: dict[str, Any]) -> OpConfig:
 
 __all__ = [
     "DEFAULT_CURRENT_MACHINE_PATH",
+    "REMOVED_RAY_ASYNC_UPLOAD_MESSAGE",
     "load_recipe_mapping",
     "deep_merge_mapping",
     "read_recipe_file",
@@ -214,6 +246,8 @@ __all__ = [
     "parse_current_machine_ssh_target",
     "expand_recipe_values",
     "require_sections",
+    "reject_removed_ray_async_upload",
+    "REMOVED_MLFLOW_TUNNEL_MESSAGE",
+    "build_mlflow_config",
     "build_op_config",
-    "pop_async_upload_config",
 ]

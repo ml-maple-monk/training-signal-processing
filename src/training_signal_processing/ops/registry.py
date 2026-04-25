@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import cast
@@ -9,8 +8,6 @@ from ..core.models import OpConfig, OpRuntimeContext
 from .base import FilterOp, MapperOp, Op, PipelineOp
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
-
-importlib.import_module("training_signal_processing.custom_ops")
 
 TransformOp = MapperOp | FilterOp | PipelineOp
 

@@ -6,9 +6,9 @@ from typing import Any, Callable, Mapping
 
 import click
 
-from ..core.models import R2Config, RuntimeRunBindings
-from ..storage.object_store import R2ObjectStore
-from .executor import Executor, StreamingRayExecutor
+from .execution import Executor, StreamingRayExecutor
+from .models import R2Config, RuntimeRunBindings
+from .storage import R2ObjectStore
 from .submission import R2ArtifactStore
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
