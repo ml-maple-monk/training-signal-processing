@@ -502,7 +502,7 @@ is a list of dicts **hardcoded in the YAML**. That's the minimum
 contract-satisfying pattern; real pipelines discover inputs from an
 external system. Compare with OCR's richer pattern at
 [pipelines/ocr/submission.py](src/training_signal_processing/pipelines/ocr/submission.py)
-(PDF glob + page-count sort). The framework only requires that your
+(PDF glob + file-size sort). The framework only requires that your
 adapter writes `input_manifest.jsonl` before the remote job starts;
 how you build that list is your pipeline's business.
 
@@ -540,7 +540,7 @@ command. Three things matter:
 Submission does not parse remote stdout. The remote job writes outputs
 to R2; the detached log contains any printed JSON summary.
 
-No rclone, no local file upload, no page-count sort — `example_echo`
+No rclone, no local file upload, no file-size sort — `example_echo`
 keeps the submission adapter minimal. For a pipeline that uploads
 local binaries, crib the rclone block at
 [pipelines/ocr/submission.py:263-353](src/training_signal_processing/pipelines/ocr/submission.py#L263).

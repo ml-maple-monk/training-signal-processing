@@ -23,8 +23,7 @@ class FakeRemoteEnvStore:
         return {"R2_BUCKET": "test-bucket"}
 
 
-def prepare_sample_ocr_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    monkeypatch.setattr(OcrSubmissionAdapter, "count_pdf_pages", lambda self, path: 1)
+def prepare_sample_ocr_run(tmp_path: Path):
     pdf_root = tmp_path / "pdfs"
     pdf_root.mkdir()
     (pdf_root / "sample.pdf").write_bytes(b"%PDF-sample")
@@ -61,10 +60,9 @@ def test_main_module_entrypoint_shows_help() -> None:
 
 
 def test_ocr_submission_uses_package_cli_entrypoint(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    prepared = prepare_sample_ocr_run(monkeypatch, tmp_path)
+    prepared = prepare_sample_ocr_run(tmp_path)
 
     assert prepared.invocation.command.startswith(
         "uv run --python 3.12 --group remote_ocr --group model python -m "
@@ -92,20 +90,18 @@ def test_example_echo_submission_uses_family_cli_remote_job() -> None:
 
 
 def test_ocr_submission_bootstrap_installs_remote_runtime(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    prepared = prepare_sample_ocr_run(monkeypatch, tmp_path)
+    prepared = prepare_sample_ocr_run(tmp_path)
 
     assert "uv python install 3.12" in prepared.bootstrap.command
     assert "--group remote_ocr --group model --no-dev --frozen" in prepared.bootstrap.command
 
 
 def test_ocr_submission_includes_aws_compatible_remote_env(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    prepared = prepare_sample_ocr_run(monkeypatch, tmp_path)
+    prepared = prepare_sample_ocr_run(tmp_path)
 
     assert (
         prepared.invocation.env["AWS_ACCESS_KEY_ID"]

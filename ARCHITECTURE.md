@@ -600,8 +600,7 @@ to the final markdown writes. Step numbers below match the diagram.
                                                                 v
 [3] OcrSubmissionAdapter.prepare_new_run         (submission.py:39)
         - glob PDFs under input.local_pdf_root
-        - count pages via pypdfium2          (submission.py:248)
-        - sort by page count + size          (in build_pdf_tasks)
+        - sort by PDF file size             (in build_pdf_tasks)
         - write input_manifest.jsonl + recipe.json to R2
         - build LocalAsyncUploadSpec (rclone)(submission.py:263)
                                                                 |
@@ -659,7 +658,7 @@ to the final markdown writes. Step numbers below match the diagram.
 
 **Worth knowing.** Steps 5-8 are framework-generic; any pipeline uses
 the same loop with different ops and exporter logic. Steps 1-4 and 7-8
-are OCR-specific (PDF discovery, page-count sort, markdown writes,
+are OCR-specific (PDF discovery, file-size sort, markdown writes,
 marker spawn isolation). The main OCR-only
 runtime override is `resolve_transform_resources` at
 [pipelines/ocr/runtime.py:105](src/training_signal_processing/pipelines/ocr/runtime.py#L105)

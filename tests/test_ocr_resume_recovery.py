@@ -124,7 +124,6 @@ def test_prepare_pdf_document_and_resume_recovery_share_markdown_key() -> None:
         "source_r2_key": "dataset/raw/pdf/books/example.pdf",
         "relative_path": "books/example.pdf",
         "source_size_bytes": 123,
-        "source_page_count": 5,
         "source_sha256": "abc123",
     }
 
@@ -159,7 +158,6 @@ def test_ocr_resume_recovery_respects_allow_overwrite() -> None:
         "source_r2_key": "dataset/raw/pdf/books/example.pdf",
         "relative_path": "books/example.pdf",
         "source_size_bytes": 123,
-        "source_page_count": 5,
         "source_sha256": "abc123",
     }
 
@@ -187,7 +185,6 @@ def test_ocr_completion_tracker_requires_expected_markdown_output() -> None:
         "source_r2_key": "dataset/raw/pdf/books/example.pdf",
         "relative_path": "books/example.pdf",
         "source_size_bytes": 123,
-        "source_page_count": 5,
         "source_sha256": "abc123",
     }
     object_store.write_bytes(

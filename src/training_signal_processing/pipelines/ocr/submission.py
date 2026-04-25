@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import shlex
 import shutil
-import sys
 import tempfile
 from pathlib import Path
 
@@ -129,13 +128,11 @@ class OcrSubmissionAdapter(SubmissionAdapter):
                     source_r2_key=join_s3_key(self.config.input.raw_pdf_prefix, relative_path),
                     relative_path=relative_path,
                     source_size_bytes=pdf_path.stat().st_size,
-                    source_page_count=self.count_pdf_pages(pdf_path),
                     source_sha256=compute_sha256_file(pdf_path),
                 )
             )
         tasks.sort(
             key=lambda task: (
-                task.source_page_count if task.source_page_count is not None else sys.maxsize,
                 task.source_size_bytes,
                 task.relative_path,
             )
@@ -143,21 +140,6 @@ class OcrSubmissionAdapter(SubmissionAdapter):
         if self.config.input.max_files is not None:
             tasks = tasks[: self.config.input.max_files]
         return tasks
-
-    def count_pdf_pages(self, pdf_path: Path) -> int | None:
-        import pypdfium2 as pdfium
-
-        try:
-            document = pdfium.PdfDocument(str(pdf_path))
-            try:
-                page_count = len(document)
-            finally:
-                document.close()
-        except Exception:
-            return None
-        if page_count <= 0:
-            return None
-        return page_count
 
     def build_async_upload_spec(
         self,

@@ -224,12 +224,6 @@ ops:
         encoding="utf-8",
     )
     monkeypatch.setattr(ocr_config, "CURRENT_MACHINE_PATH", tmp_path / "missing-machine")
-    page_counts = {"alpha.pdf": 5, "nested/beta.pdf": 1}
-    monkeypatch.setattr(
-        OcrSubmissionAdapter,
-        "count_pdf_pages",
-        lambda self, path: page_counts[path.relative_to(pdf_root).as_posix()],
-    )
     return config_path
 
 
@@ -272,11 +266,12 @@ def test_ocr_prepare_new_run_builds_async_upload_spec(
         "nested/beta.pdf",
         "alpha.pdf",
     ]
-    assert [row["source_page_count"] for row in manifest_rows] == [1, 5]
+    assert [row["source_size_bytes"] for row in manifest_rows] == [9, 10]
+    assert all("source_page_count" not in row for row in manifest_rows)
     assert prepared.async_upload.env["RCLONE_CONFIG_OCRINPUT_PROVIDER"] == "Cloudflare"
 
 
-def test_ocr_prepare_new_run_applies_max_files_after_page_sort(
+def test_ocr_prepare_new_run_applies_max_files_after_size_sort(
     monkeypatch: pytest.MonkeyPatch,
     ocr_upload_config: Path,
 ) -> None:
@@ -430,7 +425,6 @@ def build_prepared_ocr_row(runtime_context: OpRuntimeContext) -> dict[str, objec
         source_r2_key="dataset/raw/pdf/example.pdf",
         relative_path="example.pdf",
         source_size_bytes=8,
-        source_page_count=1,
         source_sha256="abc123",
     )
     return ocr_ops.PreparePdfDocumentOp().bind_runtime(runtime_context).process_row(task.to_dict())
@@ -443,7 +437,6 @@ def test_prepare_pdf_document_uses_flat_markdown_key(
         source_r2_key="dataset/raw/pdf/nested/alpha/example.pdf",
         relative_path="nested/alpha/example.pdf",
         source_size_bytes=8,
-        source_page_count=1,
         source_sha256="abc123",
     )
 
