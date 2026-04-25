@@ -8,19 +8,9 @@ import pytest
 
 from training_signal_processing.core.submission import R2ArtifactStore
 from training_signal_processing.main import cli
-from training_signal_processing.pipelines.example_echo.cli import cli as example_echo_cli
-from training_signal_processing.pipelines.example_echo.config import (
-    load_recipe_config as load_example_echo_config,
-)
-from training_signal_processing.pipelines.example_echo.submission import EchoSubmissionAdapter
 from training_signal_processing.pipelines.ocr import config as ocr_config
 from training_signal_processing.pipelines.ocr.config import load_recipe_config
 from training_signal_processing.pipelines.ocr.submission import OcrSubmissionAdapter
-
-
-class FakeRemoteEnvStore:
-    def build_remote_env(self) -> dict[str, str]:
-        return {"R2_BUCKET": "test-bucket"}
 
 
 def prepare_sample_ocr_run(tmp_path: Path):
@@ -39,11 +29,6 @@ def prepare_sample_ocr_run(tmp_path: Path):
 
 def test_main_cli_registers_ocr_remote_job_command() -> None:
     assert "ocr-remote-job" in cli.commands
-
-
-@pytest.mark.parametrize("family_cli", [example_echo_cli])
-def test_family_clis_register_remote_job_command(family_cli) -> None:
-    assert "remote-job" in family_cli.commands
 
 
 def test_main_module_entrypoint_shows_help() -> None:
@@ -67,25 +52,6 @@ def test_ocr_submission_uses_package_cli_entrypoint(
     assert prepared.invocation.command.startswith(
         "uv run --python 3.12 --group remote_ocr --group model python -m "
         "training_signal_processing.main ocr-remote-job "
-    )
-
-
-def test_example_echo_submission_uses_family_cli_remote_job() -> None:
-    config_path = Path(
-        "src/training_signal_processing/pipelines/example_echo/configs/baseline.yaml"
-    )
-    config = load_example_echo_config(config_path)
-    spec = EchoSubmissionAdapter(config=config, config_path=config_path).build_invocation_spec(
-        artifact_store=FakeRemoteEnvStore(),
-        run_id="run-001",
-        config_object_key="control/recipe.json",
-        input_manifest_key="control/input_manifest.jsonl",
-        uploaded_items=0,
-    )
-
-    assert (
-        "python -m training_signal_processing.pipelines.example_echo.cli remote-job"
-        in spec.command
     )
 
 
@@ -195,7 +161,7 @@ def test_load_recipe_config_parses_marker_ocr_resources() -> None:
     assert marker_op.options["source_object_poll_interval_sec"] == pytest.approx(2.0)
 
 
-def test_load_recipe_config_accepts_marker_ocr_resource_values_without_custom_policy(
+def test_load_recipe_config_rejects_non_positive_marker_ocr_resources(
     tmp_path: Path,
 ) -> None:
     gpu_config_path = tmp_path / "invalid_marker_gpu.yaml"
@@ -213,8 +179,34 @@ def test_load_recipe_config_accepts_marker_ocr_resource_values_without_custom_po
         encoding="utf-8",
     )
 
-    assert load_recipe_config(gpu_config_path).ray.marker_ocr_resources.num_gpus == 0
-    assert load_recipe_config(cpu_config_path).ray.marker_ocr_resources.num_cpus == 0
+    with pytest.raises(ValueError, match="num_gpus must be positive"):
+        load_recipe_config(gpu_config_path)
+    with pytest.raises(ValueError, match="num_cpus must be positive"):
+        load_recipe_config(cpu_config_path)
+
+
+def test_load_recipe_config_rejects_non_positive_upload_parallelism(
+    tmp_path: Path,
+) -> None:
+    transfers_config_path = tmp_path / "invalid_upload_transfers.yaml"
+    transfers_config_path.write_text(
+        Path("config/remote_ocr.sample.yaml")
+        .read_text(encoding="utf-8")
+        .replace("upload_transfers: 1", "upload_transfers: 0"),
+        encoding="utf-8",
+    )
+    checkers_config_path = tmp_path / "invalid_upload_checkers.yaml"
+    checkers_config_path.write_text(
+        Path("config/remote_ocr.sample.yaml")
+        .read_text(encoding="utf-8")
+        .replace("upload_checkers: 1", "upload_checkers: 0"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="input.upload_transfers must be positive"):
+        load_recipe_config(transfers_config_path)
+    with pytest.raises(ValueError, match="input.upload_checkers must be positive"):
+        load_recipe_config(checkers_config_path)
 
 
 def test_recipe_config_requires_remote_sync_paths(tmp_path: Path) -> None:
@@ -242,10 +234,6 @@ def test_recipe_config_requires_remote_sync_paths(tmp_path: Path) -> None:
     ("loader", "source_path"),
     [
         (load_recipe_config, Path("config/remote_ocr.sample.yaml")),
-        (
-            load_example_echo_config,
-            Path("src/training_signal_processing/pipelines/example_echo/configs/baseline.yaml"),
-        ),
     ],
 )
 def test_recipe_configs_reject_removed_ray_async_upload(
@@ -271,11 +259,6 @@ def test_recipe_configs_reject_removed_ray_async_upload(
     ("loader", "source_path", "stale_key"),
     [
         (load_recipe_config, Path("config/remote_ocr.sample.yaml"), "local_tracking_uri"),
-        (
-            load_example_echo_config,
-            Path("src/training_signal_processing/pipelines/example_echo/configs/baseline.yaml"),
-            "remote_tunnel_port",
-        ),
     ],
 )
 def test_recipe_configs_reject_removed_mlflow_tunnel_keys(

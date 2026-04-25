@@ -20,9 +20,10 @@ from training_signal_processing.core.submission import (
     SubmissionCoordinator,
 )
 from training_signal_processing.pipelines.ocr import config as ocr_config
+from training_signal_processing.pipelines.ocr import marker_runtime
 from training_signal_processing.pipelines.ocr import ops as ocr_ops
 from training_signal_processing.pipelines.ocr.config import load_recipe_config
-from training_signal_processing.pipelines.ocr.models import PdfTask
+from training_signal_processing.pipelines.ocr.models import DocumentResult, PdfTask
 from training_signal_processing.pipelines.ocr.runtime import OcrMarkdownExporter
 from training_signal_processing.pipelines.ocr.submission import OcrSubmissionAdapter
 
@@ -507,6 +508,36 @@ def test_prepare_pdf_document_uses_flat_markdown_key(
     assert "/nested/" not in str(row["markdown_r2_key"])
 
 
+def test_document_result_constructors_own_ocr_row_shape() -> None:
+    task = PdfTask(
+        source_r2_key="dataset/raw/pdf/example.pdf",
+        relative_path="example.pdf",
+        source_size_bytes=8,
+        source_sha256="abc123",
+    )
+
+    pending = DocumentResult.pending_from_task(
+        task=task,
+        run_id="run-001",
+        markdown_r2_key="dataset/processed/pdf_ocr/run-001/markdown/example.md",
+    )
+    success = DocumentResult.success_from_row(
+        pending.to_dict(),
+        run_id="run-001",
+        started_at="2026-04-25T00:00:00Z",
+        finished_at="2026-04-25T00:00:01Z",
+        duration_sec=1.0,
+        markdown_text="# example",
+        diagnostics={"torch_cuda_available": False},
+    )
+
+    assert pending.status == "pending"
+    assert pending.marker_exit_code == 0
+    assert success.status == "success"
+    assert success.markdown_text == "# example"
+    assert success.diagnostics == {"torch_cuda_available": False}
+
+
 def test_marker_ocr_process_row_success(
     monkeypatch: pytest.MonkeyPatch,
     ocr_runtime_context: OpRuntimeContext,
@@ -523,11 +554,14 @@ def test_marker_ocr_process_row_success(
         resolved_runtime["runtime"] = runtime
         return resolve_runtime_object_store(runtime)
 
-    monkeypatch.setattr(ocr_ops, "resolve_runtime_object_store", resolve_store)
+    monkeypatch.setattr(marker_runtime, "resolve_runtime_object_store", resolve_store)
     monkeypatch.setattr(
-        op,
-        "_convert_pdf_file",
-        lambda pdf_path, timeout_sec: ("hello markdown", {"torch_cuda_available": False}),
+        marker_runtime.MarkerRuntime,
+        "convert_pdf_file",
+        lambda self, pdf_path, timeout_sec: (
+            "hello markdown",
+            {"torch_cuda_available": False},
+        ),
     )
 
     result = op.process_row(row)
@@ -551,11 +585,16 @@ def test_marker_ocr_process_row_failure(
     ).bind_runtime(ocr_runtime_context)
     captured: dict[str, Path] = {}
 
-    def raise_error(pdf_path: Path, timeout_sec: int) -> tuple[str, dict[str, object]]:
+    def raise_error(
+        self,
+        pdf_path: Path,
+        timeout_sec: int,
+    ) -> tuple[str, dict[str, object]]:
+        del self, timeout_sec
         captured["pdf_path"] = pdf_path
         raise RuntimeError("converter exploded")
 
-    monkeypatch.setattr(op, "_convert_pdf_file", raise_error)
+    monkeypatch.setattr(marker_runtime.MarkerRuntime, "convert_pdf_file", raise_error)
 
     with pytest.raises(RuntimeError, match="converter exploded"):
         op.process_row(row)
@@ -575,11 +614,16 @@ def test_marker_ocr_process_row_timeout(
     ).bind_runtime(ocr_runtime_context)
     captured: dict[str, Path] = {}
 
-    def raise_timeout(pdf_path: Path, timeout_sec: int) -> tuple[str, dict[str, object]]:
+    def raise_timeout(
+        self,
+        pdf_path: Path,
+        timeout_sec: int,
+    ) -> tuple[str, dict[str, object]]:
+        del self, timeout_sec
         captured["pdf_path"] = pdf_path
         raise TimeoutError("Marker OCR conversion timed out after 300 seconds.")
 
-    monkeypatch.setattr(op, "_convert_pdf_file", raise_timeout)
+    monkeypatch.setattr(marker_runtime.MarkerRuntime, "convert_pdf_file", raise_timeout)
 
     with pytest.raises(TimeoutError, match="timed out"):
         op.process_row(row)
@@ -687,9 +731,9 @@ def test_convert_pdf_bytes_with_timeout_uses_spawn_context(monkeypatch: pytest.M
         def Process(self, *, target, args) -> FakeProcess:
             return FakeProcess(target=target, args=args)
 
-    monkeypatch.setattr(ocr_ops, "get_marker_mp_context", lambda: FakeContext())
+    monkeypatch.setattr(marker_runtime, "get_marker_mp_context", lambda: FakeContext())
 
-    markdown_text, diagnostics = ocr_ops.convert_pdf_bytes_with_timeout(
+    markdown_text, diagnostics = marker_runtime.convert_pdf_bytes_with_timeout(
         b"%PDF-fake",
         {"force_ocr": True, "timeout_sec": 5},
     )
@@ -713,9 +757,9 @@ def test_wait_for_source_object_polls_until_available(monkeypatch: pytest.Monkey
             calls["count"] += 1
             return calls["count"] >= 3
 
-    monkeypatch.setattr(ocr_ops, "sleep", lambda seconds: sleep_calls.append(seconds))
+    monkeypatch.setattr(marker_runtime, "sleep", lambda seconds: sleep_calls.append(seconds))
 
-    ocr_ops.wait_for_source_object(
+    marker_runtime.wait_for_source_object(
         FakeObjectStore(),
         key="dataset/raw/pdf/example.pdf",
         timeout_sec=5,
@@ -732,11 +776,11 @@ def test_wait_for_source_object_times_out(monkeypatch: pytest.MonkeyPatch) -> No
             return False
 
     times = iter([0.0, 0.0, 0.5, 0.5, 1.1, 1.1])
-    monkeypatch.setattr(ocr_ops, "perf_counter", lambda: next(times))
-    monkeypatch.setattr(ocr_ops, "sleep", lambda seconds: None)
+    monkeypatch.setattr(marker_runtime, "perf_counter", lambda: next(times))
+    monkeypatch.setattr(marker_runtime, "sleep", lambda seconds: None)
 
     with pytest.raises(TimeoutError, match="did not appear"):
-        ocr_ops.wait_for_source_object(
+        marker_runtime.wait_for_source_object(
             FakeObjectStore(),
             key="dataset/raw/pdf/example.pdf",
             timeout_sec=1,

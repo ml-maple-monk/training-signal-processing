@@ -67,8 +67,8 @@ in-memory progress per batch.
 +--------------------------------------------------------------------+
 |  TOP — pipeline-specific                                           |
 |                                                                    |
-|  pipelines/ocr                         pipelines/example_echo       |
-|    ops.py                               ops.py                       |
+|  pipelines/ocr                                                      |
+|    models.py   ops.py   marker_runtime.py   runtime.py              |
 +----------------------------|---------------------------------------+
                              |  pipelines compose ops + adapters
                              v  (concrete Op subclasses + Recipe)
@@ -546,7 +546,11 @@ full executor.
 OCR's concrete ops live in
 [pipelines/ocr/ops.py](src/training_signal_processing/pipelines/ocr/ops.py):
 `PreparePdfDocumentOp`, `SkipExistingDocumentsOp`, `MarkerOcrDocumentOp`,
-and the markdown key helpers used by prepare/runtime resume logic.
+and the markdown key helpers used by prepare/runtime resume logic. Marker
+subprocess execution, source-object polling, temporary-file staging, and
+OCR-specific event logging live in
+[pipelines/ocr/marker_runtime.py](src/training_signal_processing/pipelines/ocr/marker_runtime.py)
+so the op file stays focused on domain pipeline steps.
 
 ---
 
@@ -655,7 +659,8 @@ to the final markdown writes. Step numbers below match the diagram.
           prepare_pdf_document  ->  enrich row with markdown_r2_key
           skip_existing         ->  drop rows already in completed_source_keys
           marker_ocr            ->  spawned subprocess + GPU OCR
-                                    (resources from marker_ocr_resources)
+                                    (conversion mechanics in marker_runtime.py,
+                                     resources from marker_ocr_resources)
                                                                 |
                                                                 v
 [7] OcrMarkdownExporter.export_batch            (runtime.py)
@@ -697,6 +702,9 @@ OCR's pipeline-local files:
 - [pipelines/ocr/runtime.py](src/training_signal_processing/pipelines/ocr/runtime.py)
   (includes the markdown `Exporter`, `OutputCompletionTracker`, and
   generic runtime adapter factory).
+- [pipelines/ocr/marker_runtime.py](src/training_signal_processing/pipelines/ocr/marker_runtime.py)
+  owns Marker subprocess isolation, source-object polling, temporary PDF
+  staging, timeout calculation, and OCR event emission.
 - [pipelines/ocr/config.py](src/training_signal_processing/pipelines/ocr/config.py)
   (106 lines): builds `RecipeConfig` from the resolved YAML.
 - [pipelines/ocr/models.py](src/training_signal_processing/pipelines/ocr/models.py)
