@@ -3,8 +3,18 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from training_signal_processing.core.dataset import (
+    ConfiguredRayDatasetBuilder,
+    DatasetBuilder,
+    DatasetHandle,
+)
+from training_signal_processing.core.execution import (
+    Exporter,
+    OutputCompletionTracker,
+    PipelineRuntimeAdapter,
+    StreamingRayExecutor,
+)
 from training_signal_processing.core.models import (
-    BatchCommit,
     OpConfig,
     OpRuntimeContext,
     RayConfig,
@@ -14,20 +24,39 @@ from training_signal_processing.core.models import (
     RuntimeRunBindings,
     RuntimeTrackingContext,
 )
+from training_signal_processing.core.observability import ExecutionLogger
+from training_signal_processing.core.storage import ObjectStore
+from training_signal_processing.core.utils import join_s3_key
 from training_signal_processing.ops.base import Batch, MapperOp
 from training_signal_processing.ops.registry import RegisteredOpRegistry
-from training_signal_processing.runtime.dataset import (
-    ConfiguredRayDatasetBuilder,
-    DatasetBuilder,
-    DatasetHandle,
-)
-from training_signal_processing.runtime.executor import (
-    PipelineRuntimeAdapter,
-    StreamingRayExecutor,
-)
-from training_signal_processing.runtime.exporter import Exporter
-from training_signal_processing.runtime.observability import ExecutionLogger
-from training_signal_processing.runtime.resume import ResumeLedger
+
+
+class MemoryObjectStore(ObjectStore):
+    bucket = "memory"
+
+    def __init__(self, payloads: dict[str, bytes]) -> None:
+        self.payloads = payloads
+
+    def exists(self, key: str) -> bool:
+        return key in self.payloads
+
+    def list_keys(self, prefix: str) -> list[str]:
+        return [key for key in self.payloads if key.startswith(prefix)]
+
+    def read_bytes(self, key: str) -> bytes:
+        return self.payloads[key]
+
+    def write_bytes(self, key: str, body: bytes) -> None:
+        self.payloads[key] = body
+
+    def upload_file(self, path: Path, key: str) -> None:
+        self.payloads[key] = path.read_bytes()
+
+    def make_url(self, key: str) -> str:
+        return f"memory://{key}"
+
+    def build_pyarrow_filesystem(self):
+        raise NotImplementedError
 
 
 class SimpleDatasetHandle(DatasetHandle):
@@ -105,7 +134,12 @@ class PrepareGenericOp(MapperOp):
     op_stage = "prepare"
 
     def process_batch(self, batch: Batch) -> Batch:
-        return [{**row, "prepared": True} for row in batch]
+        runtime = self.require_runtime()
+        return [
+            {**row, "prepared": True}
+            for row in batch
+            if str(row["id"]) not in runtime.completed_source_keys
+        ]
 
 
 class TransformGenericOp(MapperOp):
@@ -122,135 +156,66 @@ class ExportGenericOp(MapperOp):
     op_stage = "export"
 
     def process_batch(self, batch: Batch) -> Batch:
-        return [{**row, "ready_for_export": True} for row in batch]
+        return [
+            {
+                **row,
+                "ready_for_export": True,
+                "status": "success",
+                "duration_sec": 0.1,
+            }
+            for row in batch
+        ]
 
 
 class FakeExporter(Exporter):
-    def __init__(self) -> None:
+    def __init__(self, object_store: MemoryObjectStore) -> None:
+        self.object_store = object_store
         self.finalized_run_state: RunState | None = None
+        self.fail_on_batch_id = ""
 
     def export_batch(self, batch_id: str, rows: Batch):
         from training_signal_processing.core.models import ExportBatchResult
 
+        if batch_id == self.fail_on_batch_id:
+            raise RuntimeError(f"injected export failure on {batch_id}")
+        output_keys = [
+            join_s3_key(
+                "output/items/fake-run-001",
+                f"outputs/{row.get('id') or row.get('relative_path') or index}.json",
+            )
+            for index, row in enumerate(rows, start=1)
+        ]
+        for output_key in output_keys:
+            self.object_store.write_bytes(output_key, b"{}")
         return ExportBatchResult(
             batch_id=batch_id,
             row_count=len(rows),
-            output_keys=[
-                f"memory://{row.get('id') or row.get('relative_path') or index}"
-                for index, row in enumerate(rows, start=1)
-            ],
+            output_keys=output_keys,
         )
 
     def finalize_run(self, run_state: RunState) -> None:
         self.finalized_run_state = run_state
 
 
-class FakeResumeLedger(ResumeLedger):
-    def __init__(self) -> None:
-        self.run_state: RunState | None = None
-        self.write_history: list[RunState] = []
+class FakeCompletionTracker(OutputCompletionTracker):
+    def source_key_for_input(self, row: dict[str, Any]) -> str:
+        return str(row["id"])
 
-    def find_latest_partial_run(self) -> str | None:
-        return None
-
-    def load_run_state(self, run_id: str) -> RunState | None:
-        if self.run_state is not None and self.run_state.run_id == run_id:
-            return self.run_state
-        return None
-
-    def load_completed_item_keys(self, run_id: str) -> set[str]:
-        return set()
-
-    def initialize_run_state(
+    def output_key_for_input(
         self,
-        *,
-        run_id: str,
-        total_items: int,
-        pending_items: int,
-        precompleted_count: int,
+        row: dict[str, Any],
         artifact_layout: RunArtifactLayout,
-        tracking_run_id: str,
-    ) -> RunState:
-        self.run_state = RunState(
-            run_id=run_id,
-            status="running",
-            total_items=total_items,
-            pending_items=pending_items,
-            success_count=0,
-            failed_count=0,
-            skipped_count=precompleted_count,
-            last_committed_batch=0,
-            started_at="2026-04-22T00:00:00Z",
-            updated_at="2026-04-22T00:00:00Z",
-            source_root_key=artifact_layout.source_root_key,
-            output_root_key=artifact_layout.output_root_key,
-            tracking_run_id=tracking_run_id,
-            current_phase="run_initialized",
-            last_phase_at="2026-04-22T00:00:00Z",
-        )
-        return self.run_state
+    ) -> str:
+        return join_s3_key(artifact_layout.output_root_key, f"outputs/{row['id']}.json")
 
-    def commit_batch(
-        self,
-        *,
-        run_state: RunState,
-        batch_index: int,
-        input_row_count: int,
-        rows: list[dict[str, Any]],
-    ) -> tuple[BatchCommit, RunState]:
-        self.run_state = RunState(
-            run_id=run_state.run_id,
-            status="running",
-            total_items=run_state.total_items,
-            pending_items=max(run_state.pending_items - input_row_count, 0),
-            success_count=run_state.success_count + len(rows),
-            failed_count=run_state.failed_count,
-            skipped_count=run_state.skipped_count,
-            last_committed_batch=batch_index,
-            started_at=run_state.started_at,
-            updated_at="2026-04-22T00:00:01Z",
-            source_root_key=run_state.source_root_key,
-            output_root_key=run_state.output_root_key,
-            tracking_run_id=run_state.tracking_run_id,
-            current_phase=run_state.current_phase,
-            last_phase_at=run_state.last_phase_at,
-        )
-        return (
-            BatchCommit(
-                batch_id=f"batch-{batch_index:05d}",
-                input_row_count=input_row_count,
-                output_row_count=len(rows),
-                success_count=len(rows),
-                failed_count=0,
-                skipped_count=0,
-                duration_sec=0.1,
-                manifest_key=f"memory://manifest/{batch_index}",
-                event_key=f"memory://event/{batch_index}",
-            ),
-            self.run_state,
-        )
-
-    def write_run_state(self, run_state: RunState) -> None:
-        self.run_state = run_state
-        self.write_history.append(run_state)
-
-    def mark_run_finished(self, run_state: RunState) -> RunState:
-        self.run_state = RunState(
-            **{**run_state.to_dict(), "status": "success", "pending_items": 0}
-        )
-        return self.run_state
-
-    def mark_run_failed(self, run_state: RunState, message: str) -> RunState:
-        self.run_state = RunState(
-            **{**run_state.to_dict(), "status": "failed", "error_message": message}
-        )
-        return self.run_state
+    def output_listing_prefix(self, artifact_layout: RunArtifactLayout) -> str:
+        return join_s3_key(artifact_layout.output_root_key, "outputs")
 
 
 class FakePipelineAdapter(PipelineRuntimeAdapter):
     def __init__(self) -> None:
-        self.exporter = FakeExporter()
-        self.resume_ledger = FakeResumeLedger()
+        self.object_store = MemoryObjectStore({})
+        self.exporter = FakeExporter(self.object_store)
         self.dataset_builder = SimpleDatasetBuilder()
         self.bindings = RuntimeRunBindings(
             run_id="fake-run-001",
@@ -300,15 +265,15 @@ class FakePipelineAdapter(PipelineRuntimeAdapter):
         self,
         *,
         logger: ExecutionLogger,
-        completed_item_keys: set[str],
+        completed_source_keys: set[str],
     ) -> OpRuntimeContext:
         return OpRuntimeContext(
             config={"name": "fake"},
             run_id=self.bindings.run_id,
-            object_store=object(),
+            object_store=self.object_store,
             output_root_key="output/items/fake-run-001",
             source_root_key="source/items",
-            completed_item_keys=completed_item_keys,
+            completed_source_keys=completed_source_keys,
             logger=logger,
         )
 
@@ -318,16 +283,15 @@ class FakePipelineAdapter(PipelineRuntimeAdapter):
     def build_exporter(self) -> Exporter:
         return self.exporter
 
-    def build_resume_ledger(self) -> ResumeLedger:
-        return self.resume_ledger
+    def build_completion_tracker(self) -> OutputCompletionTracker:
+        return FakeCompletionTracker(self.object_store)
 
     def build_dataset_builder(self) -> DatasetBuilder:
         return self.dataset_builder
 
 
 def test_runtime_modules_do_not_import_pipeline_packages(capsys) -> None:
-    """Enforce via import-linter that shared layers (core, ops, runtime, storage)
-    never import from pipelines (direct or transitive).
+    """Enforce via import-linter that shared layers never import pipelines.
 
     The contract is declared in pyproject.toml under [tool.importlinter]. This test
     invokes the linter in-process via its public API and asserts exit code 0. When
@@ -366,6 +330,34 @@ def test_root_package_exposes_only_main_entrypoint() -> None:
     assert not (package_dir / "utils.py").exists()
 
 
+def test_object_store_read_jsonl_parses_memory_body_and_ignores_blank_lines() -> None:
+    store = MemoryObjectStore(
+        {"input.jsonl": b'{"id": "a"}\n\n  {"id": "b", "value": 2}\n'}
+    )
+
+    assert store.read_jsonl("input.jsonl") == [
+        {"id": "a"},
+        {"id": "b", "value": 2},
+    ]
+
+
+def test_object_store_read_jsonl_returns_empty_list_for_blank_body() -> None:
+    store = MemoryObjectStore({"input.jsonl": b"\n  \n"})
+
+    assert store.read_jsonl("input.jsonl") == []
+
+
+def test_object_store_read_jsonl_rejects_non_object_entries() -> None:
+    store = MemoryObjectStore({"input.jsonl": b'{"id": "a"}\n42\n'})
+
+    try:
+        store.read_jsonl("input.jsonl")
+    except ValueError as exc:
+        assert "item 2 must be a JSON object" in str(exc)
+    else:
+        raise AssertionError("expected non-object JSONL entry to fail")
+
+
 def test_streaming_executor_runs_with_fake_pipeline_adapter(capsys) -> None:
     adapter = FakePipelineAdapter()
     summary = StreamingRayExecutor(adapter).run()
@@ -379,29 +371,82 @@ def test_streaming_executor_runs_with_fake_pipeline_adapter(capsys) -> None:
         "test_export_generic",
     ]
     assert summary["exported_batches"] == 2
-    assert summary["output_keys"] == ["memory://row-a", "memory://row-b"]
+    assert summary["output_keys"] == [
+        "output/items/fake-run-001/outputs/row-a.json",
+        "output/items/fake-run-001/outputs/row-b.json",
+    ]
     assert adapter.exporter.finalized_run_state is not None
     assert adapter.exporter.finalized_run_state.status == "success"
-    assert adapter.resume_ledger.run_state is not None
-    assert adapter.resume_ledger.run_state.status == "success"
     assert "[run] run_id=fake-run-001" in captured.out
     assert "[phase] run_id=fake-run-001 phase=dataset_build_start" in captured.out
     assert "[phase] run_id=fake-run-001 phase=iter_batches_start" in captured.out
     assert "[batch:start] batch_id=batch-00001" in captured.out
-    assert "[batch:commit] batch_id=batch-00002" in captured.out
+    assert "[batch:finish] batch_id=batch-00002" in captured.out
     assert "[run:finish] run_id=fake-run-001 status=success" in captured.out
     assert "run fake-run-001:" in captured.err
-    phases = [
-        state.current_phase
-        for state in adapter.resume_ledger.write_history
-        if state.current_phase
+    assert "[phase] run_id=fake-run-001 phase=manifest_loaded" in captured.out
+    assert "[phase] run_id=fake-run-001 phase=resume_state_loaded" in captured.out
+    assert "[phase] run_id=fake-run-001 phase=dataset_build_complete" in captured.out
+    assert "[phase] run_id=fake-run-001 phase=first_batch_materialized" in captured.out
+
+
+def test_output_completion_tracker_maps_existing_outputs_to_source_keys() -> None:
+    adapter = FakePipelineAdapter()
+    adapter.object_store.write_bytes(
+        "output/items/fake-run-001/outputs/row-a.json",
+        b"{}",
+    )
+
+    assert adapter.resolve_completed_source_keys(
+        input_rows=adapter.load_input_rows(),
+    ) == {"row-a"}
+
+
+def test_output_completion_tracker_ignores_outputs_when_overwrite_allowed() -> None:
+    adapter = FakePipelineAdapter()
+    adapter.bindings.allow_overwrite = True
+    adapter.object_store.write_bytes(
+        "output/items/fake-run-001/outputs/row-a.json",
+        b"{}",
+    )
+
+    assert adapter.resolve_completed_source_keys(
+        input_rows=adapter.load_input_rows(),
+    ) == set()
+
+
+def test_streaming_executor_writes_outputs_without_checkpoint_artifacts() -> None:
+    adapter = FakePipelineAdapter()
+
+    summary = StreamingRayExecutor(adapter).run()
+
+    assert summary["status"] == "success"
+    assert sorted(adapter.object_store.payloads) == [
+        "output/items/fake-run-001/outputs/row-a.json",
+        "output/items/fake-run-001/outputs/row-b.json",
     ]
-    assert "manifest_loaded" in phases
-    assert "resume_state_loaded" in phases
-    assert "dataset_build_start" in phases
-    assert "dataset_build_complete" in phases
-    assert "iter_batches_start" in phases
-    assert "first_batch_materialized" in phases
+    forbidden_fragments = ("manifests/", "events/", "run_state.json", "run.json")
+    assert not any(
+        fragment in key
+        for key in adapter.object_store.payloads
+        for fragment in forbidden_fragments
+    )
+
+
+def test_streaming_executor_does_not_mark_missing_output_complete_when_export_fails() -> None:
+    adapter = FakePipelineAdapter()
+    adapter.exporter.fail_on_batch_id = "batch-00002"
+
+    summary = StreamingRayExecutor(adapter).run()
+
+    assert summary["status"] == "failed"
+    assert "injected export failure on batch-00002" in summary["error_message"]
+    assert sorted(adapter.object_store.payloads) == [
+        "output/items/fake-run-001/outputs/row-a.json",
+    ]
+    assert adapter.resolve_completed_source_keys(
+        input_rows=adapter.load_input_rows(),
+    ) == {"row-a"}
 
 
 def test_configured_ray_dataset_builder_clamps_target_num_blocks(monkeypatch) -> None:
@@ -413,7 +458,7 @@ def test_configured_ray_dataset_builder_clamps_target_num_blocks(monkeypatch) ->
             return self
 
     monkeypatch.setattr(
-        "training_signal_processing.runtime.dataset.ray.data.from_items",
+        "training_signal_processing.core.dataset.ray.data.from_items",
         lambda rows: FakeDataset(),
     )
     builder = ConfiguredRayDatasetBuilder(
@@ -439,7 +484,7 @@ def test_configured_ray_dataset_builder_skips_repartition_for_single_row(monkeyp
             return self
 
     monkeypatch.setattr(
-        "training_signal_processing.runtime.dataset.ray.data.from_items",
+        "training_signal_processing.core.dataset.ray.data.from_items",
         lambda rows: FakeDataset(),
     )
     builder = ConfiguredRayDatasetBuilder(
@@ -524,133 +569,3 @@ def test_streaming_executor_uses_adapter_transform_resources() -> None:
             "num_cpus": None,
         },
     ]
-
-
-class RecordingCoordinator:
-    """Test double for AsyncUploadCoordinator lifecycle verification."""
-
-    def __init__(self, *, drain_fails_on_batch: int | None = None) -> None:
-        self.drain_calls = 0
-        self.abort_calls = 0
-        self.close_calls = 0
-        self.submit_calls: list[tuple[str, bytes]] = []
-        # Track order of drain vs commit_batch via an external log mutated
-        # by the fake ledger wrapping commit_batch.
-        self.events: list[str] = []
-        self._drain_fails_on_batch = drain_fails_on_batch
-
-    def submit(self, key: str, body: bytes) -> None:
-        self.submit_calls.append((key, body))
-
-    def drain(self, timeout: float | None = None) -> None:
-        self.drain_calls += 1
-        self.events.append(f"drain:{self.drain_calls}")
-        if (
-            self._drain_fails_on_batch is not None
-            and self.drain_calls == self._drain_fails_on_batch
-        ):
-            raise RuntimeError(f"injected drain failure on batch {self.drain_calls}")
-
-    def abort(self) -> int:
-        self.abort_calls += 1
-        return 0
-
-    def close(self) -> None:
-        self.close_calls += 1
-
-    def depth(self) -> int:
-        return 0
-
-
-class ThreeBatchAdapter(FakePipelineAdapter):
-    """Three-row adapter (batch_size=1 → 3 batches) for lifecycle tests."""
-
-    def load_input_rows(self) -> list[dict[str, object]]:
-        return [{"id": "row-a"}, {"id": "row-b"}, {"id": "row-c"}]
-
-
-def _ledger_event_recorder(
-    adapter: FakePipelineAdapter, coordinator: RecordingCoordinator
-) -> None:
-    """Wrap commit_batch on the adapter's ledger to record event ordering."""
-    original = adapter.resume_ledger.commit_batch
-
-    def wrapped(**kwargs: Any):  # type: ignore[no-untyped-def]
-        coordinator.events.append(f"commit:{kwargs['batch_index']}")
-        return original(**kwargs)
-
-    adapter.resume_ledger.commit_batch = wrapped  # type: ignore[assignment]
-
-
-def test_streaming_executor_drains_coordinator_before_each_commit(
-    monkeypatch,
-) -> None:
-    adapter = ThreeBatchAdapter()
-    coordinator = RecordingCoordinator()
-    _ledger_event_recorder(adapter, coordinator)
-
-    executor = StreamingRayExecutor(adapter)
-    monkeypatch.setattr(
-        executor,
-        "_build_upload_coordinator",
-        lambda *, execution, runtime_context: coordinator,
-    )
-
-    summary = executor.run()
-
-    assert summary["status"] == "success"
-    # One drain per batch (3) plus one final drain after finalize_run.
-    assert coordinator.drain_calls == 4
-    assert coordinator.abort_calls == 0
-    assert coordinator.close_calls == 1
-    # Drain must precede commit for every batch.
-    expected_prefix = [
-        "drain:1",
-        "commit:1",
-        "drain:2",
-        "commit:2",
-        "drain:3",
-        "commit:3",
-    ]
-    assert coordinator.events[: len(expected_prefix)] == expected_prefix
-
-
-def test_streaming_executor_aborts_when_drain_raises_mid_run(
-    monkeypatch,
-) -> None:
-    adapter = ThreeBatchAdapter()
-    coordinator = RecordingCoordinator(drain_fails_on_batch=2)
-    _ledger_event_recorder(adapter, coordinator)
-
-    executor = StreamingRayExecutor(adapter)
-    monkeypatch.setattr(
-        executor,
-        "_build_upload_coordinator",
-        lambda *, execution, runtime_context: coordinator,
-    )
-
-    summary = executor.run()
-
-    assert summary["status"] == "failed"
-    assert "injected drain failure" in summary["error_message"]
-    # Batch 1 committed, batch 2 drain failed → batch 2 not committed.
-    assert "commit:1" in coordinator.events
-    assert "commit:2" not in coordinator.events
-    assert "commit:3" not in coordinator.events
-    # abort() was called exactly once in the except path, before close().
-    assert coordinator.abort_calls == 1
-    assert coordinator.close_calls == 1
-    # The ledger's run state must reflect the failure.
-    assert adapter.resume_ledger.run_state is not None
-    assert adapter.resume_ledger.run_state.status == "failed"
-
-
-def test_streaming_executor_skips_coordinator_when_disabled() -> None:
-    """When async_upload is None (default), no coordinator is built."""
-    adapter = FakePipelineAdapter()
-    # Default RayConfig has async_upload=None → _build_upload_coordinator returns None.
-    summary = StreamingRayExecutor(adapter).run()
-    assert summary["status"] == "success"
-    # Nothing to assert directly — the absence of coordinator state IS the test.
-    # The existing test_streaming_executor_runs_with_fake_pipeline_adapter
-    # already exercises the full sync path.

@@ -7,8 +7,8 @@ from typing import Any
 import pyarrow as pa
 import ray
 
-from ..core.models import RayConfig
 from ..ops.base import Batch, Op
+from .models import RayConfig
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
 
@@ -144,3 +144,13 @@ class ConfiguredRayDatasetBuilder(RayDatasetBuilder):
         if self.config.target_num_blocks > 0:
             dataset = dataset.repartition(min(self.config.target_num_blocks, len(rows)))
         return dataset
+
+
+__all__ = [
+    "ConfiguredRayDatasetBuilder",
+    "DatasetBuilder",
+    "DatasetHandle",
+    "LocalRayDatasetBuilder",
+    "RayDatasetBuilder",
+    "RayDatasetHandle",
+]

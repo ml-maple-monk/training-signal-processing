@@ -12,7 +12,7 @@ This workspace uses a small YAML-first remote OCR pipeline.
 - Keep all OCR input and output on Cloudflare R2.
 - Use Marker as the only OCR engine in v1.
 - Do not sync `r2`, `infra/credentials`, `.omx`, `.cache`, or other secret/state files to the remote machine.
-- Use the SSH reverse tunnel to forward MLflow progress back to the local MLflow server.
+- Use R2 run state, batch manifests, and event logs for remote progress; MLflow is optional and must use a directly reachable `mlflow.tracking_uri`.
 - Use batch-manifest resumability only.
 - Do not hardcode bucket names, hosts, ports, paths, or batch sizes in logic; put them in YAML or fail clearly.
 - Prefer typed dataclasses over loose dicts for config and result structures.

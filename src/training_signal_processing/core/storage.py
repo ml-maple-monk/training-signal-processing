@@ -4,14 +4,15 @@ import json
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import boto3
 import pyarrow.fs as pafs
 from botocore.exceptions import ClientError
 
-from ..core.models import R2Config
-from ..core.utils import parse_env_file, write_json_bytes, write_jsonl_bytes
+from .models import R2Config
+from .utils import parse_env_file, write_json_bytes, write_jsonl_bytes
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
 
@@ -54,18 +55,24 @@ class ObjectStore(ABC):
         return payload
 
     def read_jsonl(self, key: str) -> list[dict[str, object]]:
+        lines = [
+            line.strip()
+            for line in self.read_bytes(key).decode("utf-8").splitlines()
+            if line.strip()
+        ]
+        if not lines:
+            return []
+        try:
+            payload = json.loads(f"[{','.join(lines)}]")
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Object store JSONL key '{key}' contains invalid JSONL.") from exc
+        if not isinstance(payload, list):
+            raise ValueError(f"Object store JSONL key '{key}' must contain JSON objects.")
         rows: list[dict[str, object]] = []
-        for line_number, raw_line in enumerate(
-            self.read_bytes(key).decode("utf-8").splitlines(),
-            start=1,
-        ):
-            line = raw_line.strip()
-            if not line:
-                continue
-            value = json.loads(line)
+        for item_number, value in enumerate(payload, start=1):
             if not isinstance(value, dict):
                 raise ValueError(
-                    f"Object store JSONL key '{key}' line {line_number} must be a JSON object."
+                    f"Object store JSONL key '{key}' item {item_number} must be a JSON object."
                 )
             rows.append(value)
         return rows
@@ -175,8 +182,49 @@ def ensure_r2_config_complete(config: R2Config) -> R2Config:
     return config
 
 
+def build_r2_env(config: R2Config) -> dict[str, str]:
+    resolved = ensure_r2_config_complete(config)
+    return {
+        "R2_BUCKET": resolved.bucket,
+        "R2_ACCESS_KEY_ID": resolved.access_key_id,
+        "R2_SECRET_ACCESS_KEY": resolved.secret_access_key,
+        "R2_REGION": resolved.region,
+        "R2_ENDPOINT_URL": resolved.endpoint_url,
+        "AWS_ACCESS_KEY_ID": resolved.access_key_id,
+        "AWS_SECRET_ACCESS_KEY": resolved.secret_access_key,
+        "AWS_DEFAULT_REGION": resolved.region,
+        "MLFLOW_S3_ENDPOINT_URL": resolved.endpoint_url,
+    }
+
+
 def strip_endpoint_scheme(endpoint_url: str) -> str:
     parsed = urlparse(endpoint_url)
     if parsed.netloc:
         return parsed.netloc
     return endpoint_url.removeprefix("https://").removeprefix("http://")
+
+
+def resolve_runtime_object_store(runtime_context: Any) -> ObjectStore:
+    object_store = getattr(runtime_context, "object_store", None)
+    if object_store is not None:
+        return object_store
+    config = getattr(runtime_context, "config", None)
+    r2_config = getattr(config, "r2", None)
+    if r2_config is None:
+        raise ValueError("Runtime context config must include an r2 configuration.")
+    if os.environ.get("R2_ACCESS_KEY_ID"):
+        object_store = R2ObjectStore.from_environment(r2_config)
+    else:
+        object_store = R2ObjectStore.from_config_file(r2_config)
+    runtime_context.object_store = object_store
+    return object_store
+
+
+__all__ = [
+    "ObjectStore",
+    "R2ObjectStore",
+    "build_r2_env",
+    "ensure_r2_config_complete",
+    "resolve_runtime_object_store",
+    "strip_endpoint_scheme",
+]

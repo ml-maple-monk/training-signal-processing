@@ -1,16 +1,14 @@
 # Architecture
 
 `training_signal_processing` is a small framework for running **batch
-GPU pipelines on remote machines**, plus three concrete pipelines built
-on top of it: **OCR** (Marker on PDFs), **tokenizer** (HF on parquet
-shards), and **youtube_asr** (vLLM Qwen3 ASR on YouTube media). The
-shared layer is intentionally pipeline-agnostic; new pipelines plug in
-by implementing four small ABCs and registering ops by class. This
-document captures the static structure (layers, contracts, frozen
+GPU pipelines on remote machines**, plus concrete pipeline packages on
+top of it: **OCR** (Marker on PDFs) and **example_echo** (a minimal
+reference pipeline). The shared layer is intentionally pipeline-agnostic;
+new pipelines plug in through small template bases and registered ops.
+This document captures the static structure (layers, contracts, frozen
 invariants) and the dynamic flow (submission → remote execution →
-exporter/ledger loop), then walks one OCR run end-to-end as the worked
-example. Sister pipelines and infrastructure get short closing
-sections.
+exporter/progress loop), then walks one OCR run end-to-end as the worked
+example. Infrastructure gets a short closing section.
 
 If you only want the OCR walkthrough, jump to [§12](#12-ocr-pipeline-walkthrough-end-to-end).
 If you're about to modify a file, [§3](#3-frozen-invariants) tells you
@@ -20,38 +18,46 @@ which files are protected.
 
 ## Table of contents
 
-1. [TL;DR](#1-tldr)
-2. [Layered architecture and the import contract](#2-layered-architecture-and-the-import-contract)
-3. [Frozen invariants](#3-frozen-invariants)
-4. [Static contracts: the ABCs and the concretes](#4-static-contracts-the-abcs-and-the-concretes)
-5. [Configuration plane](#5-configuration-plane)
-6. [Object storage and artifacts](#6-object-storage-and-artifacts)
-7. [Submission and transport](#7-submission-and-transport)
-8. [Remote execution flow](#8-remote-execution-flow)
-9. [Ops: registration and resolution](#9-ops-registration-and-resolution)
-10. [Observability](#10-observability)
-11. [Resume semantics](#11-resume-semantics)
-12. [OCR pipeline walkthrough end-to-end](#12-ocr-pipeline-walkthrough-end-to-end)
-13. [Other pipelines](#13-other-pipelines)
-14. [Infrastructure](#14-infrastructure)
-15. [Glossary](#15-glossary)
+- [Architecture](#architecture)
+  - [Table of contents](#table-of-contents)
+  - [1. TL;DR](#1-tldr)
+  - [2. Layered architecture and the import contract](#2-layered-architecture-and-the-import-contract)
+  - [3. Frozen invariants](#3-frozen-invariants)
+  - [4. Static contracts: the ABCs and the concretes](#4-static-contracts-the-abcs-and-the-concretes)
+    - [4.1 ABCs that pipelines implement](#41-abcs-that-pipelines-implement)
+    - [4.2 Concretes pipelines compose](#42-concretes-pipelines-compose)
+  - [5. Configuration plane](#5-configuration-plane)
+  - [6. Object storage and artifacts](#6-object-storage-and-artifacts)
+    - [6.1 Driver-side output writes](#61-driver-side-output-writes)
+  - [7. Submission and transport](#7-submission-and-transport)
+    - [7.1 Detached lifecycle](#71-detached-lifecycle)
+    - [7.2 Observability without tunnels](#72-observability-without-tunnels)
+  - [8. Remote execution flow](#8-remote-execution-flow)
+  - [9. Ops: registration and resolution](#9-ops-registration-and-resolution)
+  - [10. Observability](#10-observability)
+  - [11. Resume semantics](#11-resume-semantics)
+  - [12. OCR pipeline walkthrough end-to-end](#12-ocr-pipeline-walkthrough-end-to-end)
+  - [13. Other pipelines](#13-other-pipelines)
+  - [14. Infrastructure](#14-infrastructure)
+  - [15. Glossary](#15-glossary)
 
 ---
 
 ## 1. TL;DR
 
-Three layers, three pipelines, one runtime. The middle layer (`ops/`)
-defines an `Op` ABC; concrete ops live under `custom_ops/` and
-self-register at module import. The foundation layer (`runtime/` +
-`core/` + `storage/`) contains the executor, submission coordinator,
-artifact store, observability, and resume ledger. The top layer
+Three layers, small pipeline packages, one runtime. The middle layer (`ops/`)
+defines the `Op` ABC and registry. Concrete ops live inside the
+pipeline package that owns them (`pipelines/<name>/ops.py`) and
+self-register when that package is imported. The foundation layer
+(`core/`) contains the executor, submission coordinator, object store,
+observability, event sinks, and outputs-only completion tracking. The top layer
 (`pipelines/`) wires per-pipeline `RecipeConfig`, runtime adapter, and
 submission adapter. A run is two halves: a local **submission** that
-syncs code, uploads inputs to R2, and SSHes a `python -m
+syncs YAML-declared paths, uploads inputs to R2, and SSHes a `python -m
 training_signal_processing.main ocr-remote-job …` invocation onto a
 remote GPU box; and a **remote execution** that rebuilds the config
 from R2, runs ops via Ray Data `map_batches`, and writes outputs +
-ledger entries back to R2 per batch.
+in-memory progress per batch.
 
 ---
 
@@ -61,9 +67,8 @@ ledger entries back to R2 per batch.
 +--------------------------------------------------------------------+
 |  TOP — pipeline-specific                                           |
 |                                                                    |
-|  pipelines/ocr        pipelines/tokenizer    pipelines/youtube_asr |
-|  custom_ops/user_ops  custom_ops/tokenizer_  custom_ops/yt_asr_ops |
-|                       ops                                          |
+|  pipelines/ocr                                                      |
+|    models.py   ops.py   marker_runtime.py   runtime.py              |
 +----------------------------|---------------------------------------+
                              |  pipelines compose ops + adapters
                              v  (concrete Op subclasses + Recipe)
@@ -80,16 +85,11 @@ ledger entries back to R2 per batch.
 +--------------------------------------------------------------------+
 |  FOUNDATION — pipeline-agnostic                                    |
 |                                                                    |
-|  runtime/                |   core/             |   storage/        |
-|    submission.py         |     models.py       |     object_store  |
-|    executor.py           |     utils.py        |       .py         |
-|    dataset.py            |     config_loading  |                   |
-|    exporter.py           |       .py           |                   |
-|    resume.py             |                     |                   |
-|    observability.py      |                     |                   |
-|    remote_job.py         |                     |                   |
-|    async_upload_         |                     |                   |
-|      coordinator.py      |                     |                   |
+|  core/                                                             |
+|    models.py       config_loading.py     utils.py                  |
+|    storage.py      submission.py         remote.py                 |
+|    execution.py    dataset.py            observability.py          |
+|                                                                    |
 +--------------------------------------------------------------------+
                                    ^
                                    | enforced by [tool.importlinter]:
@@ -97,9 +97,22 @@ ledger entries back to R2 per batch.
                                    |  from pipelines"
 ```
 
+The runtime flow is intentionally small enough to draw:
+
+```
+YAML recipe
+  -> core/models.py dataclasses
+  -> SubmissionCoordinator.submit()  -> SSH/R2/rclone
+  -> ObjectStoreRemoteJob.run()
+  -> StreamingRayExecutor.run()
+  -> observability helpers
+  -> ops/base.py + concrete pipeline ops
+  -> R2 outputs
+```
+
 The contract at `pyproject.toml [[tool.importlinter.contracts]]`
-declares `core`, `ops`, `runtime`, `storage` as `source_modules` that
-are forbidden from importing `training_signal_processing.pipelines`.
+declares `core` and `ops` as `source_modules` that are forbidden from
+importing `training_signal_processing.pipelines`.
 Recent commits `a5c7c77` and `ec67025` retired the last leaks; tests
 in `tests/test_runtime_generic.py` and `tests/test_cli_entrypoints.py`
 are pipeline-agnostic by construction.
@@ -132,14 +145,11 @@ The authoritative list is whatever
 
 | File | Why it's frozen |
 |------|-----------------|
-| `runtime/submission.py` | Submission/transport ABCs + `SubmissionCoordinator` glue |
-| `runtime/executor.py` | `Executor` + `PipelineRuntimeAdapter` ABC + `StreamingRayExecutor` |
-| `runtime/dataset.py` | `DatasetBuilder` ABC + Ray adapters |
-| `runtime/observability.py` | `ExecutionLogger` + `ProgressTracker` ABCs + MLflow concrete |
-| `runtime/exporter.py` | `Exporter` ABC |
-| `runtime/resume.py` | `ResumeLedger` ABC |
-| `runtime/remote_job.py` | `RemoteJob` + `build_remote_job_cli` factory + guard CLI |
-| `runtime/__init__.py` | Marker only |
+| `core/submission.py` | Submission/transport ABCs + `SubmissionCoordinator` glue |
+| `core/execution.py` | `Executor`, `PipelineRuntimeAdapter`, `OutputCompletionTracker`, `Exporter`, `StreamingRayExecutor` |
+| `core/dataset.py` | `DatasetBuilder` ABC + Ray adapters |
+| `core/observability.py` | `ExecutionLogger` + `ProgressTracker` ABCs + MLflow concrete |
+| `core/remote.py` | `RemoteJob` + `build_remote_job_cli` factory + guard CLI |
 | `ops/base.py` | `Op` ABC + auto-registration mechanism |
 | `ops/builtin.py` | Stage templates pipelines subclass |
 | `ops/registry.py` | `OpRegistry` + import-sweep bootstrap |
@@ -147,9 +157,8 @@ The authoritative list is whatever
 | `ops/__init__.py` | Marker only |
 | `core/models.py` | All shared dataclasses (`R2Config`, `RayConfig`, `RunState`, …) |
 | `core/utils.py` | Cross-cutting helpers (`join_s3_key`, `utc_isoformat`, …) |
-| `storage/object_store.py` | `ObjectStore` ABC + `R2ObjectStore` |
-| `custom_ops/__init__.py` | The package-import sweep that triggers Op registration |
-| `custom_ops/user_ops.py` | OCR ops (also tagged frozen) |
+| `core/storage.py` | `ObjectStore` ABC + `R2ObjectStore` |
+| `pipelines/<name>/ops.py` | Pipeline-owned concrete ops |
 | `main.py` | OCR CLI entrypoint |
 
 The import-linter contract above is the second invariant: shared
@@ -163,40 +172,38 @@ layers stay pipeline-agnostic.
 
 | ABC | File:line | Methods (abstract) |
 |-----|-----------|--------------------|
-| `SubmissionAdapter` | [runtime/submission.py:478](src/training_signal_processing/runtime/submission.py#L478) | `prepare_new_run`, `prepare_resume_run`, `parse_remote_summary` |
-| `PipelineRuntimeAdapter` | [runtime/executor.py:49](src/training_signal_processing/runtime/executor.py#L49) | `get_run_bindings`, `get_execution_config`, `get_tracking_context`, `get_op_configs`, `get_artifact_layout`, `load_input_rows`, `build_runtime_context`, `build_op_registry`, `build_exporter`, `build_resume_ledger` |
-| `ResumeLedger` | [runtime/resume.py:11](src/training_signal_processing/runtime/resume.py#L11) | `find_latest_partial_run`, `load_run_state`, `load_completed_item_keys`, `initialize_run_state`, `commit_batch`, `write_run_state`, `mark_run_finished`, `mark_run_failed` |
-| `Exporter` | [runtime/exporter.py:11](src/training_signal_processing/runtime/exporter.py#L11) | `export_batch`, `finalize_run` |
+| `SubmissionAdapter` | [core/submission.py:478](src/training_signal_processing/core/submission.py#L478) | `prepare_new_run`, `prepare_resume_run` |
+| `PipelineRuntimeAdapter` | [core/execution.py](src/training_signal_processing/core/execution.py) | run bindings, execution/tracking config, op config, artifact layout, input loading, runtime context, op registry, exporter, completion tracker |
+| `OutputCompletionTracker` | [core/execution.py](src/training_signal_processing/core/execution.py) | `completed_source_keys`, `source_key_for_input`, `output_key_for_input`, `output_listing_prefix` |
+| `Exporter` / `RayExporter` | [core/execution.py](src/training_signal_processing/core/execution.py) | `export_batch`, optional `finalize_run` |
 | `OpRegistry` | [ops/registry.py:50](src/training_signal_processing/ops/registry.py#L50) (template `resolve_pipeline`) | `resolve_pipeline(configs) -> ResolvedOpPipeline` |
 | `Op` (+ `MapperOp` / `FilterOp` / `PipelineOp`) | [ops/base.py:17](src/training_signal_processing/ops/base.py#L17), [:82](src/training_signal_processing/ops/base.py#L82), [:90](src/training_signal_processing/ops/base.py#L90), [:101](src/training_signal_processing/ops/base.py#L101) | `process_batch(Batch) -> Batch` (and one of: `op_name`, `op_stage`) |
 
-`PipelineRuntimeAdapter` lines [94-107](src/training_signal_processing/runtime/executor.py#L94-L107)
-are **default-method extension hooks** rather than pure abstractions:
-`build_dataset_builder` (defaults to `ConfiguredRayDatasetBuilder`),
-`resolve_completed_item_keys` (defaults to passthrough),
-`resolve_transform_resources` (defaults to "no override"). OCR
-overrides the last to assign GPU resources to `marker_ocr` —
-[pipelines/ocr/runtime.py:105](src/training_signal_processing/pipelines/ocr/runtime.py#L105).
+`PipelineRuntimeAdapter` has default-method extension hooks rather than making
+every pipeline reimplement framework plumbing: `build_dataset_builder` defaults
+to `ConfiguredRayDatasetBuilder`, `resolve_completed_source_keys` delegates to
+the completion tracker, and `resolve_transform_resources` defaults to "no
+override". OCR overrides the last to assign GPU resources to `marker_ocr`.
 
 ### 4.2 Concretes pipelines compose
 
-These are provided by the runtime; pipelines consume them as-is.
+These are provided by `core`; pipelines consume them as-is.
 
 | Class | File:line | Role |
 |-------|-----------|------|
-| `R2ArtifactStore` | [runtime/submission.py:316](src/training_signal_processing/runtime/submission.py#L316) | `ArtifactStore` over R2/S3; `build_remote_env` at [:354](src/training_signal_processing/runtime/submission.py#L354) emits R2 + AWS-compat + MLflow S3 endpoint vars |
-| `SshRemoteTransport` | [runtime/submission.py:386](src/training_signal_processing/runtime/submission.py#L386) | `RemoteTransport` over rsync + ssh; supports `-R` reverse tunnels |
-| `SubmissionCoordinator` | [runtime/submission.py:492](src/training_signal_processing/runtime/submission.py#L492) | Orchestrates `prepare → sync → bootstrap → execute (+ async upload)` |
-| `StreamingRayExecutor` | [runtime/executor.py:114](src/training_signal_processing/runtime/executor.py#L114) | The `Executor` for batch GPU pipelines; per-batch loop |
+| `R2ArtifactStore` | [core/submission.py:316](src/training_signal_processing/core/submission.py#L316) | `ArtifactStore` over R2/S3; `build_remote_env` at [:354](src/training_signal_processing/core/submission.py#L354) emits R2 + AWS-compat + MLflow S3 endpoint vars |
+| `SshRemoteTransport` | [core/submission.py:386](src/training_signal_processing/core/submission.py#L386) | `RemoteTransport` over rsync + ssh; `launch_detached` spawns the remote job under `setsid` and records its pgid |
+| `SubmissionCoordinator` | [core/submission.py:492](src/training_signal_processing/core/submission.py#L492) | Orchestrates `prepare → sync → bootstrap → (optional local upload wait) → launch_detached → return LaunchHandle` |
+| `StreamingRayExecutor` | [core/execution.py:114](src/training_signal_processing/core/execution.py#L114) | The `Executor` for batch GPU pipelines; per-batch loop |
 | `RegisteredOpRegistry` | [ops/registry.py:63](src/training_signal_processing/ops/registry.py#L63) | The concrete `OpRegistry`; triggers the import-sweep on module load |
-| `RayDatasetBuilder` / `ConfiguredRayDatasetBuilder` | [runtime/dataset.py:57](src/training_signal_processing/runtime/dataset.py#L57), [:132](src/training_signal_processing/runtime/dataset.py#L132) | `DatasetBuilder` over Ray Data; `Configured` re-partitions to `target_num_blocks` |
-| `MlflowExecutionLogger` / `MlflowProgressTracker` | [runtime/observability.py:32](src/training_signal_processing/runtime/observability.py#L32), [:364](src/training_signal_processing/runtime/observability.py#L364) | MLflow-backed `ExecutionLogger` and `ProgressTracker`; `StructuredExecutionLogger` and `NullProgressReporter` are the no-MLflow fallbacks |
-| `RemoteJob` / `ObjectStoreRemoteJob` / `build_remote_job_cli` | [runtime/remote_job.py](src/training_signal_processing/runtime/remote_job.py) | The remote-side CLI factory; pipelines wrap it in ~30 lines |
+| `RayDatasetBuilder` / `ConfiguredRayDatasetBuilder` | [core/dataset.py:57](src/training_signal_processing/core/dataset.py#L57), [:132](src/training_signal_processing/core/dataset.py#L132) | `DatasetBuilder` over Ray Data; `Configured` re-partitions to `target_num_blocks` |
+| `MlflowExecutionLogger` / `MlflowProgressTracker` | [core/observability.py:32](src/training_signal_processing/core/observability.py#L32), [:364](src/training_signal_processing/core/observability.py#L364) | MLflow-backed `ExecutionLogger` and `ProgressTracker`; `StructuredExecutionLogger` and `NullProgressReporter` are the no-MLflow fallbacks |
+| `RemoteJob` / `ObjectStoreRemoteJob` / `build_remote_job_cli` | [core/remote.py](src/training_signal_processing/core/remote.py) | The remote-side CLI factory; non-OCR pipelines expose it as `cli remote-job` |
 
 The shared dataclasses live in [core/models.py](src/training_signal_processing/core/models.py):
 `R2Config`, `RayConfig`, `RayTransformResources`, `RemoteRuntimeConfig`,
 `SshConfig`, `MlflowConfig`, `OpConfig`, `RuntimeRunBindings`,
-`RuntimeTrackingContext`, `RunArtifactLayout`, `BatchCommit`,
+`RuntimeTrackingContext`, `RunArtifactLayout`, `BatchProgress`,
 `ExportBatchResult`, `RunState`, `ExecutionLogEvent`,
 `ExecutorRunSummary`, `OpRuntimeContext`.
 
@@ -206,12 +213,12 @@ The shared dataclasses live in [core/models.py](src/training_signal_processing/c
 
 A run is described by a YAML recipe + zero or more YAML overlays + zero
 or more dotted-path `--set` overrides. The pipeline-agnostic plumbing
-lives in [core/config_loading.py:17](src/training_signal_processing/core/config_loading.py#L17)
-(`load_recipe_mapping`) and [:38](src/training_signal_processing/core/config_loading.py#L38)
-(`deep_merge_mapping`). Each pipeline's `config.py` thin-wraps it
-(e.g. [pipelines/ocr/config.py:34](src/training_signal_processing/pipelines/ocr/config.py#L34)
-`load_recipe_config`) and supplies its own
-`build_recipe_config(raw, path)` + `validate_recipe_constraints(raw)`.
+lives in [core/config_loading.py](src/training_signal_processing/core/config_loading.py)
+(`load_recipe_mapping` and `deep_merge_mapping`). Each pipeline's
+`config.py` thin-wraps it through `AbstractRecipeConfigLoader`. The
+base loader owns required-section checks, overlays, dotted overrides,
+stale-key rejection, and op-config construction; the pipeline supplies
+only typed recipe construction.
 
 ```
 $ uv run python -m training_signal_processing.main run \
@@ -226,7 +233,7 @@ Resolution order:
 2. For each subsequent `--config`, deep-merge mapping by mapping;
    scalars/lists/`ops` are replaced wholesale by the overlay.
 3. Apply `--set key.path=value` overrides last.
-4. **OCR + youtube_asr only:** if `infra/current-machine` exists and
+4. **OCR only:** if `infra/current-machine` exists and
    neither `ssh.host` nor `ssh.port` was overridden, parse the file
    for an `ssh -p <port> user@host` command and inject those into
    `recipe.ssh`. (`apply_current_machine_target` at
@@ -240,23 +247,35 @@ The gitignored `infra/current-machine` carries each operator's box;
 hardcoding an SSH target poisons the repo for collaborators. This
 is documented in `pipelines/ocr/configs/baseline.yaml`.
 
+Operational launch/upload knobs are explicit YAML too. `remote` owns
+`sync_paths`, the detached-job root, and pgid wait loop settings; `input` owns OCR upload
+parallelism, and the `marker_ocr` op options own OCR conversion timeout and
+source-object polling interval. These values should not be reintroduced as
+logic-level defaults.
+
 ---
 
 ## 6. Object storage and artifacts
 
-`ObjectStore` ([storage/object_store.py:19](src/training_signal_processing/storage/object_store.py#L19))
+`ObjectStore` ([core/storage.py:19](src/training_signal_processing/core/storage.py#L19))
 is an ABC: `exists`, `list_keys`, `read_bytes`, `write_bytes`,
 `upload_file`, `make_url`, `build_pyarrow_filesystem`, plus convenience
 wrappers `read_json` / `write_json` / `read_jsonl` / `write_jsonl`.
-The only concrete is `R2ObjectStore` ([:80](src/training_signal_processing/storage/object_store.py#L80)),
+The only concrete is `R2ObjectStore` ([:80](src/training_signal_processing/core/storage.py#L80)),
 which uses `boto3` against a Cloudflare R2 endpoint and accepts
 credentials via either an env file (`from_config_file`) or process
 environment (`from_environment`).
 
-`ArtifactStore` ([runtime/submission.py:284](src/training_signal_processing/runtime/submission.py#L284))
+Runtime ops do not construct stores through `OpRuntimeContext`. The context
+only carries the current store slot and typed run metadata; `core.storage`
+owns `resolve_runtime_object_store(...)`, which reuses an attached store or
+builds `R2ObjectStore` from remote env/config when Ray has deserialized the
+context with unpicklable services cleared.
+
+`ArtifactStore` ([core/submission.py:284](src/training_signal_processing/core/submission.py#L284))
 is the runtime-side façade — same contract plus `upload_file` and
 `build_remote_env`. The concrete `R2ArtifactStore` wraps an
-`R2ObjectStore`; `build_remote_env` ([:354](src/training_signal_processing/runtime/submission.py#L354))
+`R2ObjectStore`; `build_remote_env` ([:354](src/training_signal_processing/core/submission.py#L354))
 returns the env-var bundle the remote process needs:
 `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_REGION`,
 `R2_ENDPOINT_URL`, plus AWS-compatible aliases
@@ -269,68 +288,33 @@ Per-run keys live under `r2.output_prefix/<run_id>/`:
 ```
 control/input_manifest.jsonl   # input rows for executor
 control/recipe.json            # exact resolved recipe used
-manifests/<batch_id>.jsonl     # per-batch result rows (ledger)
-events/<batch_id>.json         # per-batch event summary (ledger)
-run_state.json                 # current run state (ledger)
-run.json                       # final summary (exporter.finalize_run)
-<pipeline outputs>             # markdown for OCR, jsonl.gz for tokenizer, ...
+<pipeline outputs>             # markdown for OCR, JSON for example_echo, ...
 ```
 
 `RunArtifactLayout` (`core/models.py`) carries the two roots
 (`source_root_key`, `output_root_key`) the executor passes into the
 runtime context.
 
-### 6.1 Async upload coordinator (driver-side)
+### 6.1 Driver-side output writes
 
-`AsyncUploadCoordinator` ([runtime/async_upload_coordinator.py:28](src/training_signal_processing/runtime/async_upload_coordinator.py#L28))
-is an opt-in component that lets the driver overlap per-batch R2
-writes with downstream compute. Without it, `Exporter.export_batch`
-loops through rows calling `object_store.write_bytes(...)`
-synchronously — each `put_object` blocks the batch loop, so the
-driver cannot advance to the next batch (or to
-`resume_ledger.commit_batch`) until every PUT has returned.
+`RayExporter._put_bytes` ([core/execution.py](src/training_signal_processing/core/execution.py))
+is deliberately synchronous: it calls `object_store.write_bytes(...)`
+and returns only after the R2 `put_object` completes. `StreamingRayExecutor`
+therefore advances in one obvious order for driver-side exporters:
+`export_batch` writes outputs, `validate_export_result` checks the
+reported batch shape, and only then does the executor update in-memory
+batch progress.
 
-The coordinator owns one daemon thread hosting an `asyncio` event
-loop and a long-lived `aioboto3` S3 client. `submit(key, body)`
-returns immediately after scheduling an upload coroutine on that
-loop; bounds are enforced by an `asyncio.Semaphore(max_in_flight)`
-on the loop side and a `threading.Semaphore(max_queued)` on the
-submit side (backpressure so memory doesn't blow up under a fast
-producer). A `_put_bytes(self, key, body)` helper on `RayExporter`
-([runtime/exporter.py:21](src/training_signal_processing/runtime/exporter.py#L21))
-routes to `coordinator.submit` when an upload coordinator is
-attached, and falls back to `object_store.write_bytes` otherwise.
+This is the durability boundary for OCR markdown. If a markdown write
+fails, the exception leaves `export_batch`, the executor marks the run
+failed, and the missing output is not considered complete on restart.
+Resume lists expected output objects and skips only source keys whose
+outputs already exist. There is no `ray.async_upload` YAML surface for
+remote output writes.
 
-Lifecycle is scoped to one run, orchestrated by the executor:
-constructed once after `build_exporter()`, drained before every
-`resume_ledger.commit_batch` (so a failed upload surfaces as a run
-failure rather than a partial commit), aborted in the outer
-`except` handler, and closed in a `finally` block for idempotent
-teardown. `R2ObjectStore` itself stays untouched — its
-`write_bytes` signature is unchanged, and the coordinator holds no
-state on the store, so the same `R2ObjectStore` instance stays safe
-to pickle into Ray worker closures (workers continue to use the
-sync path).
-
-Opt-in via YAML — the default is absent:
-
-```yaml
-ray:
-  async_upload:
-    enabled: true
-    max_in_flight: 8
-    max_queued: 32
-```
-
-If the block is omitted (or `enabled: false`), `_build_upload_coordinator`
-([runtime/executor.py](src/training_signal_processing/runtime/executor.py))
-returns `None` and the export path uses sync writes — behavior
-identical to the pre-coordinator runtime. Worker-side writes
-(`custom_ops/youtube_asr_ops.py`, `custom_ops/tokenizer_ops.py`)
-are intentionally not routed through the coordinator: workers live
-in separate processes, so a driver-side asyncio loop doesn't help
-them, and the complexity of per-worker loops would outweigh the
-gain.
+Local OCR input upload is separate: `OcrSubmissionAdapter` still builds
+a local `rclone` command, and `SubmissionCoordinator` waits for it before
+launching the remote job so the pod never races missing source PDFs.
 
 ---
 
@@ -354,9 +338,9 @@ LOCAL                                                    REMOTE
                 | write_json       |   | upload    |     | --r-id... |
                 +------------------+   | (background)    +-----+-----+
                                        +-----------+           |
-                          ssh -R 15000:127.0.0.1:5000          v
-                          MLflow tunnel: remote port 15000     [Diagram 3]
-                          forwards to local MLflow at 5000
+                          detached ssh launch                  v
+                          progress is written to R2            [Diagram 3]
+                          optional MLflow uses direct URI
 ```
 
 The flow on the local side is split between three interfaces:
@@ -364,28 +348,42 @@ The flow on the local side is split between three interfaces:
 - `SubmissionAdapter` (per-pipeline) returns a `PreparedRun` whose
   fields tell the coordinator what to do: `sync_paths` (rsync targets),
   `bootstrap` (shell to run after sync), `invocation` (the remote
-  command + env + reverse tunnels), `artifacts` (input/output refs),
-  and optionally `async_upload` (a local rclone command run in
-  parallel with the remote execution).
+  command + env), `artifacts` (input/output refs),
+  and optionally `async_upload` (a local rclone command for source
+  inputs, always awaited before remote execution starts).
 - `RemoteTransport` (`SshRemoteTransport`) implements `sync`,
-  `bootstrap`, `execute` over SSH + rsync.
-- `SubmissionCoordinator.submit` ([runtime/submission.py:492](src/training_signal_processing/runtime/submission.py#L492))
-  orchestrates them: prepare → sync code → bootstrap → start async
-  upload (if any) → execute remote → cleanup local upload paths →
-  parse the remote stdout via `adapter.parse_remote_summary`.
+  `bootstrap`, `execute`, and `launch_detached` over SSH + rsync.
+- `SubmissionCoordinator.submit` ([core/submission.py:492](src/training_signal_processing/core/submission.py#L492))
+  orchestrates them: prepare → sync code → bootstrap → start local
+  source upload (if any) → wait for upload → launch_detached → return
+  LaunchHandle. The remote writes pipeline outputs to R2.
+
+### 7.1 Detached lifecycle
+
+`submit()` returns immediately once `setsid` writes `job.pgid` on the
+pod — it is **fire-and-forget**. The remote OCR job runs in its own
+process group under PID 1 (init), so SSH disconnects cannot kill it.
+Remote stdout/stderr live at `/root/ocr-jobs/<run_id>/job.log`; the
+local CLI prints only the `LaunchHandle` JSON and exits. **Exit code 0
+means "launched successfully", not "run complete".** Completion must be
+inferred by listing output objects in R2 or by tailing the remote log.
+
+### 7.2 Observability without tunnels
+
+Remote completion is durable in R2 output objects. Runtime progress is
+in memory and optionally mirrored to MLflow. When `mlflow.enabled=true`, the YAML must
+provide a `mlflow.tracking_uri` reachable from the process doing the
+logging; the framework does not rewrite the URI or open SSH tunnels.
 
 OCR-side helpers worth pointing at:
 
 - `OcrSubmissionAdapter.build_async_upload_spec`
   ([pipelines/ocr/submission.py:263](src/training_signal_processing/pipelines/ocr/submission.py#L263))
-  builds the rclone argv (lines 263-322). The R2-flavored env for
+  builds the local source-PDF rclone argv (lines 263-322). The R2-flavored env for
   rclone comes from `build_rclone_env` ([:330](src/training_signal_processing/pipelines/ocr/submission.py#L330)).
 - `build_invocation_spec` ([pipelines/ocr/submission.py:156](src/training_signal_processing/pipelines/ocr/submission.py#L156))
   composes the remote `uv run python -m main ocr-remote-job …`
-  command; `build_reverse_tunnel_spec` ([:206](src/training_signal_processing/pipelines/ocr/submission.py#L206))
-  produces the `-R 15000:127.0.0.1:5000` tunnel string when MLflow is
-  enabled, so the remote process can post to the operator's local
-  MLflow server.
+  command and passes R2 credentials as environment variables.
 
 ---
 
@@ -398,37 +396,36 @@ $ uv run python -m training_signal_processing.main \
                      --input-manifest-key ... --uploaded-items N
         |
         v
-build_remote_job_cli closure  (runtime/remote_job.py)
+build_remote_job_cli closure  (core/remote.py)
         |
         v
-ObjectStoreRemoteJob.run()  (runtime/remote_job.py)
+ObjectStoreRemoteJob.run()  (core/remote.py)
         |
         v
-StreamingRayExecutor.run()  (runtime/executor.py:114)
+StreamingRayExecutor.run()  (core/execution.py:114)
         |
         +--- pipeline.get_run_bindings / get_execution_config /
         |    get_tracking_context / get_artifact_layout / get_op_configs
         |
-        +--- validate_contract                       (executor.py:444)
+        +--- _validate_contract
         |    raises PipelineContractError on misuse
         |
-        +--- build MlflowExecutionLogger             (observability.py:32)
-        +--- build MlflowProgressTracker             (observability.py:364)
+        +--- _build_execution_logger                 (observability.py)
+        +--- MlflowProgressTracker                   (observability.py)
+        +--- pipeline.load_input_rows()              # reads input_manifest.jsonl
         |
-        +--- pipeline.build_resume_ledger()
-        |     load_completed_item_keys(prior_run_id)  if resume
-        |     initialize_run_state(...)
+        +--- pipeline.build_completion_tracker()
+        |     completed_source_keys(input_rows, artifact_layout, allow_overwrite)
         |
-        +--- pipeline.build_runtime_context(logger=, completed_item_keys=)
+        +--- pipeline.build_runtime_context(logger=, completed_source_keys=)
         +--- pipeline.build_op_registry(runtime_context=)
         +--- registry.resolve_pipeline(op_configs)   (registry.py:50)
         |     -> ResolvedOpPipeline(prepare, [transforms], export)
         |
         +--- pipeline.build_dataset_builder()
         |     default: ConfiguredRayDatasetBuilder
-        +--- pipeline.load_input_rows()              # reads input_manifest.jsonl
         |
-        +--- apply_pipeline_transforms               (executor.py:405)
+        +--- _apply_dataset_transform                # lazy Ray transforms
         |     dataset.map_batches(prepare_op, ...)
         |     for op in transform_ops:
         |         resources = pipeline.resolve_transform_resources(op, execution)
@@ -437,30 +434,21 @@ StreamingRayExecutor.run()  (runtime/executor.py:114)
         |                                  num_cpus=R.num_cpus)
         |     (LAZY — no actual execution yet)
         |
-        +--- coordinator = _build_upload_coordinator(execution, ...)
-        |     # returns None unless ray.async_upload.enabled AND
-        |     # object_store isinstance R2ObjectStore
-        |     if coordinator: exporter.upload_coordinator = coordinator
-        |
         +--- try:                                            # lifecycle wrap
         |    for batch in dataset_builder.iter_batches(dataset, batch_size):
         |       # FIRST iter materializes the lazy plan
-        |       exporter.export_batch(batch_id, rows)         # queue writes
-        |       if coordinator: coordinator.drain()           # await in-flight
-        |       resume_ledger.commit_batch(...)               # ledger write
-        |       progress_tracker.log_batch_commit(...)        # MLflow metrics
-        |       transition_run_phase(..., "first_batch_materialized")
+        |       exporter.export_batch(batch_id, rows)         # writes outputs
+        |       _build_batch_progress(rows)                  # in-memory counters
+        |       progress_tracker.log_batch_progress(...)      # MLflow metrics
+        |       _transition_run_phase(..., "first_batch_materialized")
         |
-        |    resume_ledger.mark_run_finished(run_state)
+        |    mark_run_finished(run_state)
         |    exporter.finalize_run(run_state)
-        |    if coordinator: coordinator.drain()              # final drain
-        |    return ExecutorRunSummary.to_dict()              # printed by CLI
+        |    return ExecutorRunSummary.to_dict()              # local CLI has already exited
+        |                                                     # with a LaunchHandle (see §7.1)
         |
         +--- except Exception:
-        |      if coordinator: coordinator.abort()            # cancel in-flight
-        |      resume_ledger.mark_run_failed(run_state, ...)  # status=failed
-        +--- finally:
-               if coordinator: coordinator.close()            # idempotent
+        |      mark_run_failed(run_state, ...)                 # in-memory status=failed
 ```
 
 Three properties matter:
@@ -470,13 +458,13 @@ Three properties matter:
    `iter_batches` pulls a batch. This is what gives Ray Data its
    pipelining behavior.
 2. **Per-op resource override.** Default `resolve_transform_resources`
-   ([runtime/executor.py:101](src/training_signal_processing/runtime/executor.py#L101))
+   ([core/execution.py:101](src/training_signal_processing/core/execution.py#L101))
    returns an empty `RayTransformResources`. OCR overrides at
    [pipelines/ocr/runtime.py:105](src/training_signal_processing/pipelines/ocr/runtime.py#L105)
    to give `marker_ocr` the configured `num_gpus` / `num_cpus` from
    `config.ray.marker_ocr_resources`.
 3. **Phase telemetry.** `transition_run_phase`
-   ([runtime/executor.py:313](src/training_signal_processing/runtime/executor.py#L313))
+   ([core/execution.py:313](src/training_signal_processing/core/execution.py#L313))
    is called at every checkpoint (`manifest_loaded`, `dataset_build_*`,
    `iter_batches_start`, `first_batch_materialized`, …) — it persists
    to `RunState.current_phase` and emits a structured event so an
@@ -487,26 +475,21 @@ Three properties matter:
 ## 9. Ops: registration and resolution
 
 Ops are not registered explicitly — they self-register on import.
-The trigger is one line at the top of `ops/registry.py`.
+Each pipeline package imports its own `ops.py` from `__init__.py`, so
+its concrete ops are registered before CLI validation or remote
+execution resolves the recipe.
 
 ```
 import time
 =========
 
-ops/registry.py:13
+pipelines/ocr/__init__.py
    |
    v
-   importlib.import_module(
-       "training_signal_processing.custom_ops")
+   from . import ops
                 |
                 v
-   custom_ops/__init__.py:9-21
-       import_custom_op_modules()
-       for each .py in custom_ops/:
-           import_module(f"{__name__}.{stem}")
-                |
-                v
-   importing user_ops.py loads, e.g.:
+   importing pipelines/ocr/ops.py loads, e.g.:
        class PreparePdfDocumentOp(SourcePreparationOp):
            op_name = "prepare_pdf_document"
                 |
@@ -522,7 +505,6 @@ run time
        - {name: prepare_pdf_document, type: mapper}
        - {name: skip_existing,        type: filter}
        - {name: marker_ocr,           type: mapper, force_ocr: true}
-       - {name: export_markdown,      type: mapper}
                 |
                 v
    OpRegistry.resolve_pipeline(configs)   (registry.py:50)
@@ -532,14 +514,13 @@ run time
        group by op.op_stage:
          prepare    -> exactly one
          transform  -> >= one
-         export     -> exactly one
-       -> ResolvedOpPipeline(prepare, [transforms...], export)
+         export     -> zero or one
+       -> ResolvedOpPipeline(prepare, [transforms...], export?)
 ```
 
 **Adding a new transform op for OCR:**
 
-1. Define the class somewhere under `custom_ops/` (typical home:
-   `custom_ops/user_ops.py`):
+1. Define the class in `pipelines/ocr/ops.py`:
    ```
    class MyTransformOp(RowWiseMapperOp):
        op_name = "my_transform"
@@ -554,21 +535,22 @@ run time
      - {name: skip_existing,        type: filter}
      - {name: my_transform,         type: mapper}
      - {name: marker_ocr,           type: mapper, force_ocr: true}
-     - {name: export_markdown,      type: mapper}
    ```
 
-The class is auto-discovered by the import-sweep; no other
-registration step is needed. Op-level testing uses
+The class is registered when `training_signal_processing.pipelines.ocr`
+is imported. Op-level testing uses
 `build_default_ray_op_test_harness()` in `ops/testing.py` to exercise
 a single op against a `LocalRayDatasetBuilder` without spinning up the
 full executor.
 
 OCR's concrete ops live in
-[custom_ops/user_ops.py](src/training_signal_processing/custom_ops/user_ops.py):
-`PreparePdfDocumentOp` ([:208](src/training_signal_processing/custom_ops/user_ops.py#L208)),
-`SkipExistingDocumentsOp` ([:238](src/training_signal_processing/custom_ops/user_ops.py#L238)),
-`MarkerOcrDocumentOp` ([:248](src/training_signal_processing/custom_ops/user_ops.py#L248)),
-`ExportMarkdownResultOp` ([:364](src/training_signal_processing/custom_ops/user_ops.py#L364)).
+[pipelines/ocr/ops.py](src/training_signal_processing/pipelines/ocr/ops.py):
+`PreparePdfDocumentOp`, `SkipExistingDocumentsOp`, `MarkerOcrDocumentOp`,
+and the markdown key helpers used by prepare/runtime resume logic. Marker
+subprocess execution, source-object polling, temporary-file staging, and
+OCR-specific event logging live in
+[pipelines/ocr/marker_runtime.py](src/training_signal_processing/pipelines/ocr/marker_runtime.py)
+so the op file stays focused on domain pipeline steps.
 
 ---
 
@@ -579,11 +561,11 @@ Two parallel hierarchies: an **event stream** (`ExecutionLogger`,
 (`ProgressTracker` + `ProgressReporter`).
 
 - **Events.** `ExecutionLogEvent` ([core/models.py](src/training_signal_processing/core/models.py))
-  is the unit. `MlflowExecutionLogger` ([observability.py:32](src/training_signal_processing/runtime/observability.py#L32))
+  is the unit. `MlflowExecutionLogger` ([observability.py:32](src/training_signal_processing/core/observability.py#L32))
   buffers events until the MLflow run id is known, then flushes via
   `attach_run_id`; per-event side effects update an
   `execution_event_count` metric and re-stamp `last_execution_event_*`
-  tags ([:64](src/training_signal_processing/runtime/observability.py#L64)).
+  tags ([:64](src/training_signal_processing/core/observability.py#L64)).
   This tag re-stamp is the run's **heartbeat** — an external watcher
   can look at the tag to confirm the run is alive without polling
   metrics.
@@ -593,8 +575,8 @@ Two parallel hierarchies: an **event stream** (`ExecutionLogger`,
   `monitor.run.start` / `finish` / `fail` (RunState snapshots);
   ad-hoc events from concrete ops via
   `op.log_runtime_event(level, code, message, **details)`.
-- **Metrics.** `MlflowProgressTracker.log_batch_commit`
-  ([:418](src/training_signal_processing/runtime/observability.py#L418))
+- **Metrics.** `MlflowProgressTracker.log_batch_progress`
+  ([:418](src/training_signal_processing/core/observability.py#L418))
   writes `success_count`, `failed_count`, `skipped_count`,
   `pending_items`, `batch_duration_sec` keyed by
   `step=run_state.last_committed_batch`. `log_run_started` logs run
@@ -615,25 +597,19 @@ with bracketed phase markers) when `total_items > 0`, otherwise
 
 A run can be resumed by SHA-equivalent recipe + the prior `run_id`.
 The resume side of `SubmissionAdapter.prepare_resume_run`
-([runtime/submission.py:482](src/training_signal_processing/runtime/submission.py#L482))
+([core/submission.py:482](src/training_signal_processing/core/submission.py#L482))
 loads the prior `recipe.json` and `input_manifest.jsonl` from R2 and
 reuses them. On the remote side, `StreamingRayExecutor.run` calls
-`pipeline.build_resume_ledger().load_completed_item_keys(run_id)` and
-threads the resulting set into `OpRuntimeContext.completed_item_keys`,
-which `SkipExistingFilter` consults to drop already-processed rows.
+`pipeline.build_completion_tracker().completed_source_keys(...)` and
+threads the resulting set into `OpRuntimeContext.completed_source_keys`,
+which skip ops consult to drop already-processed rows.
 
-Per-batch ledger writes are atomic: each batch produces three R2
-writes (`manifests/<batch_id>.jsonl`, `events/<batch_id>.json`,
-`run_state.json`). `commit_batch` ([pipelines/ocr/resume.py:86](src/training_signal_processing/pipelines/ocr/resume.py#L86))
-writes them in that order; if the executor dies between batches, the
-next resume starts from the latest committed batch.
-
-`OcrResumeLedger.find_latest_partial_run`
-([pipelines/ocr/resume.py:18](src/training_signal_processing/pipelines/ocr/resume.py#L18))
-filters `list_keys` output to `*/run_state.json` keys, sorts
-descending, and returns the first whose status is `running` or
-`partial`. This avoids the per-key `set` dedup that the original
-implementation did (cleanup landed in commit `0b303b0`).
+There is no durable checkpoint ledger. Each pipeline maps a source row
+to its expected output object; if that object exists under the run output
+prefix, the source key is complete. If the executor dies before an output
+write succeeds, that object is absent and the source is retried on the next
+run. `allow_overwrite=True` makes the completed set empty so every source is
+processed again.
 
 ---
 
@@ -653,69 +629,67 @@ to the final markdown writes. Step numbers below match the diagram.
                                                                 v
 [3] OcrSubmissionAdapter.prepare_new_run         (submission.py:39)
         - glob PDFs under input.local_pdf_root
-        - count pages via pypdfium2          (submission.py:248)
-        - sort by page count + size          (in build_pdf_tasks)
+        - sort by PDF file size             (in build_pdf_tasks)
         - write input_manifest.jsonl + recipe.json to R2
         - build LocalAsyncUploadSpec (rclone)(submission.py:263)
                                                                 |
                                                                 v
 [4] SubmissionCoordinator.submit                 (submission.py:492)
-                ┌─────────────┬──────────────┬──────────────┐
-                │             │              │              │
-                v             v              v              v
-          rsync -az      bootstrap        rclone parallel  ssh execute:
-          sync_paths     uv sync          upload of PDFs   uv run python
-                                                            -m main \
-                                                            ocr-remote-job \
-                                                            --run-id ... \
-                                                            --config-object-key K \
-                                                            --input-manifest-key M \
-                                                            --uploaded-items N
-                                                            (-R 15000:127.0.0.1:5000)
+                ┌───────────┬──────────┬──────────┬────────────────┐
+                │           │          │          │                │
+                v           v          v          v                v
+          rsync -az    bootstrap  rclone      launch_detached   return
+          sync_paths   uv sync    parallel    (setsid sh -c …  LaunchHandle
+                                  upload of   echo $$>pgid;   (local CLI
+                                  PDFs        exec launch.sh   exits here;
+                                  (awaited    & — survives    remote keeps
+                                   before     SSH disconnect)  running under
+                                   launch)                    setsid)
                                                                 |
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~ network boundary ~~~~~~~~~~~~~~~~~~~|~~~~~~~~~~
                                                                 v
-[5] (REMOTE) build_remote_job_cli closure        (runtime/remote_job.py)
+[5] (REMOTE) build_remote_job_cli closure        (core/remote.py)
         - bootstrap_store.read_json(config_object_key)  -> recipe dict
-        - build OcrPipelineRuntimeAdapter(config, bindings, object_store)
+        - build generic ObjectStorePipelineRuntimeAdapter(config, bindings, object_store)
         - ObjectStoreRemoteJob.run()
                                                                 |
                                                                 v
 [6] StreamingRayExecutor.run()                   (executor.py:114)
         per-batch loop iterates ops:
           prepare_pdf_document  ->  enrich row with markdown_r2_key
-          skip_existing         ->  drop rows already in completed_item_keys
+          skip_existing         ->  drop rows already in completed_source_keys
           marker_ocr            ->  spawned subprocess + GPU OCR
-                                    (resources from marker_ocr_resources)
-          export_markdown       ->  validates row shape, no I/O
+                                    (conversion mechanics in marker_runtime.py,
+                                     resources from marker_ocr_resources)
                                                                 |
                                                                 v
-[7] OcrMarkdownExporter.export_batch            (exporter.py:16)
+[7] OcrMarkdownExporter.export_batch            (runtime.py)
         - for row in rows:
             if row.status != "success": continue
             self._put_bytes(markdown_r2_key, markdown_text.encode())
             cleanup_staged_pdf(row.staged_pdf_path)
-        # _put_bytes routes to the async coordinator if attached,
-        # else falls back to sync object_store.write_bytes. The
-        # executor drains the coordinator before commit_batch below.
+        # _put_bytes is synchronous: the markdown object is durable
+        # before in-memory progress records the row below.
                                                                 |
                                                                 v
-[8] OcrResumeLedger.commit_batch                (resume.py:86)
-        - write manifests/<batch_id>.jsonl   (per-batch result rows)
-        - write events/<batch_id>.json       (counts + duration)
-        - update run_state.json              (running pending_items, etc.)
+[8] StreamingRayExecutor._build_batch_progress
+        - count success / failed / skipped rows
+        - update in-memory RunState
+        - optionally log MLflow progress
                                                                 |
                               ... loop until input exhausted ...
                                                                 v
-[9] mark_run_finished -> finalize_run -> CLI prints ExecutorRunSummary
+[9] mark_run_finished -> finalize_run
         status is one of: success | partial | failed
-        run.json carries the final RunState
+        (local CLI already exited with a LaunchHandle at step [4];
+         operators list output objects or tail /root/ocr-jobs/<run_id>/job.log
+         to see completion — see ONBOARDING §3 *Running-job runbook*)
 ```
 
-**Worth knowing.** Steps 5-8 are framework-generic; they are the same
-loop the tokenizer and youtube_asr pipelines run, only with different
-ops. Steps 1-4 and 7-8 are OCR-specific (PDF discovery, page-count
-sort, markdown writes, marker spawn isolation). The single OCR-only
+**Worth knowing.** Steps 5-8 are framework-generic; any pipeline uses
+the same loop with different ops and exporter logic. Steps 1-4 and 7-8
+are OCR-specific (PDF discovery, file-size sort, markdown writes,
+marker spawn isolation). The main OCR-only
 runtime override is `resolve_transform_resources` at
 [pipelines/ocr/runtime.py:105](src/training_signal_processing/pipelines/ocr/runtime.py#L105)
 which gives `marker_ocr` a GPU.
@@ -726,18 +700,16 @@ OCR's pipeline-local files:
   (359 lines): the `SubmissionAdapter`. The bulk is the rclone block
   ([:263-353](src/training_signal_processing/pipelines/ocr/submission.py#L263)).
 - [pipelines/ocr/runtime.py](src/training_signal_processing/pipelines/ocr/runtime.py)
-  (118 lines): the `PipelineRuntimeAdapter`.
-- [pipelines/ocr/resume.py](src/training_signal_processing/pipelines/ocr/resume.py)
-  (183 lines): the `ResumeLedger`.
-- [pipelines/ocr/exporter.py](src/training_signal_processing/pipelines/ocr/exporter.py)
-  (52 lines): the `Exporter` — writes markdown bytes per batch.
+  (includes the markdown `Exporter`, `OutputCompletionTracker`, and
+  generic runtime adapter factory).
+- [pipelines/ocr/marker_runtime.py](src/training_signal_processing/pipelines/ocr/marker_runtime.py)
+  owns Marker subprocess isolation, source-object polling, temporary PDF
+  staging, timeout calculation, and OCR event emission.
 - [pipelines/ocr/config.py](src/training_signal_processing/pipelines/ocr/config.py)
   (106 lines): builds `RecipeConfig` from the resolved YAML.
 - [pipelines/ocr/models.py](src/training_signal_processing/pipelines/ocr/models.py)
   (124 lines): `RecipeConfig`, `PdfTask`, `DocumentResult`,
   `OcrRayConfig`, `InputConfig`, `ResumeConfig`.
-- [pipelines/ocr/remote_job.py](src/training_signal_processing/pipelines/ocr/remote_job.py)
-  (34 lines): a 5-line wrapper around `build_remote_job_cli`.
 - [pipelines/ocr/configs/baseline.yaml](src/training_signal_processing/pipelines/ocr/configs/baseline.yaml)
   + [experiment.example.yaml](src/training_signal_processing/pipelines/ocr/configs/experiment.example.yaml):
   the runnable baseline + an example overlay.
@@ -746,30 +718,12 @@ OCR's pipeline-local files:
 
 ## 13. Other pipelines
 
-**Tokenizer** (`pipelines/tokenizer/`, ops in
-[custom_ops/tokenizer_ops.py](src/training_signal_processing/custom_ops/tokenizer_ops.py)).
-Input rows are `ParquetShardTask` (one parquet shard per row).
-`TokenizeHfTokenIdsOp` lazily loads the model via
-`AutoTokenizer.from_pretrained` at
-[custom_ops/tokenizer_ops.py:170](src/training_signal_processing/custom_ops/tokenizer_ops.py#L170),
-reads each shard via `pq.read_table` directly off the R2 filesystem,
-encodes the configured text column, and the exporter writes per-shard
-gzipped JSONL of token IDs back to R2. CPU-only; no GPU resources.
-
-**YouTube ASR** (`pipelines/youtube_asr/`, ops in
-[custom_ops/youtube_asr_ops.py](src/training_signal_processing/custom_ops/youtube_asr_ops.py)).
-Input rows are `YoutubeMediaTask`. The transcribe op `Qwen3AsrVllmOp`
-([custom_ops/youtube_asr_ops.py:59](src/training_signal_processing/custom_ops/youtube_asr_ops.py#L59))
-lazily loads `Qwen3ASRModel.LLM(...)` once per worker and runs
-`model.transcribe(audio=media_paths, language=language)` per batch
-([:124](src/training_signal_processing/custom_ops/youtube_asr_ops.py#L124))
-— the model load is amortized across all rows in the batch. GPU
-batch-shaped, vLLM-backed.
-
-Both pipelines reuse all the same runtime machinery; only their
-`PipelineRuntimeAdapter`, `SubmissionAdapter`, custom ops, and
-`RecipeConfig` differ. Their `remote_job.py` is a 5-line wrapper
-around `build_remote_job_cli`, identical in shape to OCR's.
+**example_echo** (`pipelines/example_echo/`) is the minimal reference
+pipeline. It declares source rows inline in YAML, timestamps them in Ray
+Data, writes one JSON object per source, and exposes its remote job via
+`python -m training_signal_processing.pipelines.example_echo.cli remote-job`.
+Use it as the smallest working shape for new pipeline families; OCR is
+the richer production example.
 
 ---
 
@@ -790,7 +744,7 @@ around `build_remote_job_cli`, identical in shape to OCR's.
 
 **Per-machine SSH target.** `infra/current-machine` is the sole link
 between the operator's local box and "the GPU node currently
-provisioned." The OCR + youtube_asr config loaders read it (when not
+provisioned." The OCR config loader reads it (when not
 overridden via `--set ssh.host=…`) so a single recipe.yaml is
 portable across operators.
 
@@ -802,8 +756,7 @@ process gets the env-var bundle from `R2ArtifactStore.build_remote_env`.
 **Python deps.** `pyproject.toml [dependency-groups]` declares only
 three groups: `dev` (lint/test), `model` (`torch`, `transformers`),
 `remote_ocr` (`boto3`, `click`, `marker-pdf`, `mlflow-skinny`,
-`pyarrow`, `pyyaml`, `ray[data]`, `torch`, `tqdm`). Tokenizer and
-youtube_asr reuse `remote_ocr`'s deps. `[tool.uv.sources]` pins
+`pyarrow`, `pyyaml`, `ray[data]`, `torch`, `tqdm`). `[tool.uv.sources]` pins
 `torch` to PyTorch's CUDA-128 wheel index on linux.
 
 ---
@@ -812,12 +765,12 @@ youtube_asr reuse `remote_ocr`'s deps. `[tool.uv.sources]` pins
 
 - **R2** — Cloudflare R2, S3-compatible object storage.
 - **rclone** — CLI for parallel uploads to R2/S3; OCR uses it for
-  bulk PDF transfer in parallel with remote execution.
+  bulk PDF transfer before detached remote execution starts.
 - **rsync** — CLI for code/lockfile sync; `SshRemoteTransport.sync`
   invokes it under SSH.
 - **Marker** — `marker-pdf`; the OCR engine OCR'd by `marker_ocr`.
-- **MLflow** — Experiment tracker; remote process posts to operator's
-  local MLflow server through an SSH `-R` reverse tunnel.
+- **MLflow** — Optional experiment tracker; when enabled, it must use
+  a directly reachable `mlflow.tracking_uri`.
 - **vLLM** — LLM serving runtime used by `Qwen3AsrVllmOp` for batched
   inference.
 - **dstack** — Alternate provisioning path under `infra/dstack/`.
@@ -828,4 +781,4 @@ youtube_asr reuse `remote_ocr`'s deps. `[tool.uv.sources]` pins
   materializes.
 - **ABC** — Python `abc.ABC`; a base class with abstract methods that
   concrete subclasses must implement. Used pervasively in
-  `runtime/`, `ops/`, `storage/`.
+  `core/` and `ops/`.

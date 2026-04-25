@@ -1,118 +1,125 @@
 from __future__ import annotations
 
-import os
+from pathlib import Path
 
+from ...core.execution import (
+    ObjectStorePipelineRuntimeAdapter,
+    OutputCompletionTracker,
+    RayExporter,
+)
 from ...core.models import (
-    OpRuntimeContext,
+    ExportBatchResult,
     RayConfig,
     RayTransformResources,
     RunArtifactLayout,
     RuntimeRunBindings,
-    RuntimeTrackingContext,
 )
+from ...core.remote import build_remote_job_cli
+from ...core.storage import R2ObjectStore
 from ...core.utils import join_s3_key
 from ...ops.base import Op
-from ...ops.registry import OpRegistry, RegisteredOpRegistry
-from ...runtime.executor import PipelineRuntimeAdapter
-from ...runtime.exporter import Exporter
-from ...runtime.observability import ExecutionLogger
-from ...runtime.resume import ResumeLedger
-from ...storage.object_store import R2ObjectStore
-from .exporter import OcrMarkdownExporter
-from .models import RecipeConfig
-from .resume import OcrResumeLedger
+from .config import build_recipe_config
+from .models import DocumentResult, PdfTask, RecipeConfig
+from .ops import build_markdown_r2_key
 
 
-class OcrPipelineRuntimeAdapter(PipelineRuntimeAdapter):
-    def __init__(
+class OcrMarkdownExporter(RayExporter):
+    def export_batch(self, batch_id: str, rows: list[dict[str, object]]) -> ExportBatchResult:
+        output_keys: list[str] = []
+        for row in rows:
+            result = DocumentResult.from_dict(row)
+            try:
+                if result.status != "success":
+                    continue
+                if not result.markdown_r2_key.strip():
+                    raise ValueError("Successful OCR rows must include markdown_r2_key.")
+                if not result.markdown_text:
+                    raise ValueError("Successful OCR rows must include markdown_text.")
+                self._put_bytes(
+                    result.markdown_r2_key,
+                    result.markdown_text.encode("utf-8"),
+                )
+                output_keys.append(result.markdown_r2_key)
+            finally:
+                self.cleanup_staged_pdf(result.staged_pdf_path)
+        return ExportBatchResult(
+            batch_id=batch_id,
+            row_count=len(rows),
+            output_keys=output_keys,
+        )
+
+    def cleanup_staged_pdf(self, staged_pdf_path: str) -> None:
+        if not staged_pdf_path.strip():
+            return
+        try:
+            Path(staged_pdf_path).unlink(missing_ok=True)
+        except OSError:
+            return
+
+
+class OcrCompletionTracker(OutputCompletionTracker):
+    def source_key_for_input(self, row: dict[str, object]) -> str:
+        return PdfTask.from_dict(row).source_r2_key
+
+    def output_key_for_input(
         self,
-        *,
-        config: RecipeConfig,
-        bindings: RuntimeRunBindings,
-        object_store: R2ObjectStore,
-    ) -> None:
-        self.config = config
-        self.bindings = bindings
-        self.object_store = object_store
+        row: dict[str, object],
+        artifact_layout: RunArtifactLayout,
+    ) -> str:
+        task = PdfTask.from_dict(row)
+        return build_markdown_r2_key(artifact_layout.output_root_key, task.relative_path)
 
-    def get_run_bindings(self) -> RuntimeRunBindings:
-        return self.bindings
+    def output_listing_prefix(self, artifact_layout: RunArtifactLayout) -> str:
+        return join_s3_key(artifact_layout.output_root_key, "markdown")
 
-    def get_execution_config(self):  # type: ignore[override]
-        return self.config.ray
 
-    def get_tracking_context(self) -> RuntimeTrackingContext:
-        marker = self.config.ray.marker_ocr_resources
-        return RuntimeTrackingContext(
-            enabled=self.config.mlflow.enabled,
-            tracking_uri=os.environ.get("MLFLOW_TRACKING_URI", ""),
-            experiment_name=self.config.mlflow.experiment_name,
-            run_name=self.config.run_name,
-            executor_type=self.config.ray.executor_type,
-            batch_size=self.config.ray.batch_size,
-            concurrency=self.config.ray.concurrency,
-            target_num_blocks=self.config.ray.target_num_blocks,
-            extra_params={
-                "marker_ocr_num_gpus": marker.num_gpus if marker.num_gpus is not None else 0.0,
-                "marker_ocr_num_cpus": marker.num_cpus if marker.num_cpus is not None else 0.0,
-            },
-        )
+def build_ocr_tracking_extra_params(
+    config: RecipeConfig,
+) -> dict[str, int | float | str | bool]:
+    marker = config.ray.marker_ocr_resources
+    return {
+        "marker_ocr_num_gpus": marker.num_gpus if marker.num_gpus is not None else 0.0,
+        "marker_ocr_num_cpus": marker.num_cpus if marker.num_cpus is not None else 0.0,
+    }
 
-    def get_op_configs(self):
-        return self.config.ops
 
-    def get_artifact_layout(self) -> RunArtifactLayout:
-        return RunArtifactLayout(
-            source_root_key=self.config.input.raw_pdf_prefix,
-            output_root_key=join_s3_key(self.config.r2.output_prefix, self.bindings.run_id),
-        )
+def resolve_ocr_transform_resources(
+    config: RecipeConfig,
+    op: Op,
+    execution: RayConfig,
+) -> RayTransformResources:
+    if op.name != "marker_ocr":
+        return RayTransformResources()
+    marker = config.ray.marker_ocr_resources
+    return RayTransformResources(
+        concurrency=execution.concurrency,
+        num_gpus=marker.num_gpus,
+        num_cpus=marker.num_cpus,
+    )
 
-    def load_input_rows(self) -> list[dict[str, object]]:
-        return self.object_store.read_jsonl(self.bindings.input_manifest_key)
 
-    def build_runtime_context(
-        self,
-        *,
-        logger: ExecutionLogger,
-        completed_item_keys: set[str],
-    ) -> OpRuntimeContext:
-        artifact_layout = self.get_artifact_layout()
-        return OpRuntimeContext(
-            config=self.config,
-            run_id=self.bindings.run_id,
-            object_store=self.object_store,
-            output_root_key=artifact_layout.output_root_key,
-            source_root_key=artifact_layout.source_root_key,
-            completed_item_keys=completed_item_keys,
-            allow_overwrite=self.bindings.allow_overwrite,
-            logger=logger,
-        )
+def build_adapter(
+    config: RecipeConfig,
+    bindings: RuntimeRunBindings,
+    object_store: R2ObjectStore,
+) -> ObjectStorePipelineRuntimeAdapter:
+    return ObjectStorePipelineRuntimeAdapter(
+        config=config,
+        bindings=bindings,
+        object_store=object_store,
+        source_root_key=config.input.raw_pdf_prefix,
+        exporter_factory=OcrMarkdownExporter,
+        completion_tracker_factory=OcrCompletionTracker,
+        tracking_extra_params=build_ocr_tracking_extra_params(config),
+        transform_resources_resolver=lambda op, execution: resolve_ocr_transform_resources(
+            config,
+            op,
+            execution,
+        ),
+    )
 
-    def build_op_registry(self, runtime_context: OpRuntimeContext) -> OpRegistry:
-        return RegisteredOpRegistry(runtime_context=runtime_context)
 
-    def build_exporter(self) -> Exporter:
-        return OcrMarkdownExporter(self.object_store)
-
-    def build_resume_ledger(self) -> ResumeLedger:
-        return OcrResumeLedger(config=self.config, object_store=self.object_store)
-
-    def resolve_completed_item_keys(self, completed_item_keys: set[str]) -> set[str]:
-        if self.bindings.allow_overwrite:
-            return set()
-        return completed_item_keys
-
-    def resolve_transform_resources(
-        self,
-        *,
-        op: Op,
-        execution: RayConfig,
-    ) -> RayTransformResources:
-        if op.name != "marker_ocr":
-            return super().resolve_transform_resources(op=op, execution=execution)
-        marker = self.config.ray.marker_ocr_resources
-        return RayTransformResources(
-            concurrency=execution.concurrency,
-            num_gpus=marker.num_gpus,
-            num_cpus=marker.num_cpus,
-        )
+ocr_remote_job_cli = build_remote_job_cli(
+    recipe_loader=build_recipe_config,
+    adapter_factory=build_adapter,
+)

@@ -1,49 +1,40 @@
 from __future__ import annotations
 
-import json
 import shlex
 import shutil
-import sys
 import tempfile
 from pathlib import Path
-from urllib.parse import urlparse
 
-from ...core.utils import compute_sha256_file, join_s3_key, parse_env_file, utc_timestamp
-from ...runtime.submission import (
-    ArtifactRef,
+from ...core.submission import (
     ArtifactStore,
     BootstrapSpec,
     LocalAsyncUploadSpec,
-    PreparedRun,
     RemoteInvocationSpec,
     SubmissionAdapter,
+    SubmissionManifest,
 )
+from ...core.utils import compute_sha256_file, join_s3_key, parse_env_file
 from .config import load_resolved_recipe_mapping
 from .models import PdfTask, RecipeConfig
 
 
 class OcrSubmissionAdapter(SubmissionAdapter):
-    def __init__(
+    config: RecipeConfig
+
+    def pipeline_family(self) -> str:
+        return "ocr"
+
+    def build_new_run_manifest(
         self,
         *,
-        config: RecipeConfig,
-        config_path: Path,
-        overrides: list[str] | None = None,
-        overlay_paths: tuple[Path, ...] = (),
-    ) -> None:
-        self.config = config
-        self.config_path = config_path
-        self.overrides = overrides or []
-        self.overlay_paths = tuple(overlay_paths)
-
-    def prepare_new_run(self, artifact_store: ArtifactStore, *, dry_run: bool) -> PreparedRun:
-        run_id = utc_timestamp()
+        artifact_store: ArtifactStore,
+        run_id: str,
+        dry_run: bool,
+    ) -> SubmissionManifest:
         pdf_root = Path(self.config.input.local_pdf_root).expanduser()
         discovered_pdf_paths = self.discover_pdf_paths(pdf_root)
         manifest_rows = self.build_pdf_tasks(pdf_root, discovered_pdf_paths)
         pdf_paths = [pdf_root / task.relative_path for task in manifest_rows]
-        input_manifest_key = self.build_control_key(run_id, "input_manifest.jsonl")
-        config_object_key = self.build_control_key(run_id, "recipe.json")
         async_upload: LocalAsyncUploadSpec | None = None
         if not dry_run:
             async_upload = self.build_async_upload_spec(
@@ -52,113 +43,17 @@ class OcrSubmissionAdapter(SubmissionAdapter):
                 pdf_paths=pdf_paths,
                 run_id=run_id,
             )
-            artifact_store.write_jsonl(
-                input_manifest_key,
-                [task.to_dict() for task in manifest_rows],
-            )
-            artifact_store.write_json(
-                config_object_key,
-                load_resolved_recipe_mapping(
-                    self.config_path,
-                    self.overrides,
-                    overlay_paths=self.overlay_paths,
-                ),
-            )
-        return self.build_prepared_run(
-            artifact_store=artifact_store,
-            run_id=run_id,
-            input_manifest_key=input_manifest_key,
-            config_object_key=config_object_key,
+        return SubmissionManifest(
+            rows=[task.to_dict() for task in manifest_rows],
             discovered_items=len(manifest_rows),
-            uploaded_items=0,
-            is_resume=False,
             async_upload=async_upload,
         )
 
-    def prepare_resume_run(self, artifact_store: ArtifactStore, run_id: str) -> PreparedRun:
-        input_manifest_key = self.build_control_key(run_id, "input_manifest.jsonl")
-        config_object_key = self.build_control_key(run_id, "recipe.json")
-        if not artifact_store.exists(input_manifest_key):
-            raise ValueError(f"Resume manifest not found in R2: {input_manifest_key}")
-        if not artifact_store.exists(config_object_key):
-            raise ValueError(f"Resume recipe object not found in R2: {config_object_key}")
-        manifest_rows = artifact_store.read_jsonl(input_manifest_key)
-        return self.build_prepared_run(
-            artifact_store=artifact_store,
-            run_id=run_id,
-            input_manifest_key=input_manifest_key,
-            config_object_key=config_object_key,
-            discovered_items=len(manifest_rows),
-            uploaded_items=0,
-            is_resume=True,
-        )
-
-    def parse_remote_summary(self, stdout: str) -> dict[str, object]:
-        stripped = stdout.strip()
-        if not stripped:
-            raise ValueError("Remote job returned no JSON summary on stdout.")
-        # The remote driver emits progress lines (e.g. "[run] ...", MLflow
-        # banners) to stdout before the final JSON summary. Find the last
-        # top-level JSON object by scanning from the end for a line starting
-        # with '{' at column 0 and parsing from there through EOF.
-        candidate: str | None = None
-        for line_start in range(len(stripped) - 1, -1, -1):
-            if stripped[line_start] == "{" and (
-                line_start == 0 or stripped[line_start - 1] == "\n"
-            ):
-                candidate = stripped[line_start:]
-                break
-        if candidate is None:
-            candidate = stripped
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError as exc:
-            preview = stripped[:2000]
-            tail = stripped[-500:] if len(stripped) > 2500 else ""
-            raise ValueError(
-                f"Remote stdout is not valid JSON ({exc}). "
-                f"Length={len(stripped)}.\n"
-                f"--- stdout head ---\n{preview}\n"
-                + (f"--- stdout tail ---\n{tail}\n" if tail else "")
-            ) from exc
-
-    def build_prepared_run(
-        self,
-        *,
-        artifact_store: ArtifactStore,
-        run_id: str,
-        input_manifest_key: str,
-        config_object_key: str,
-        discovered_items: int,
-        uploaded_items: int,
-        is_resume: bool,
-        async_upload: LocalAsyncUploadSpec | None = None,
-    ) -> PreparedRun:
-        return PreparedRun(
-            run_id=run_id,
-            remote_root=self.config.remote.root_dir,
-            sync_paths=("pyproject.toml", "uv.lock", "src", "config"),
-            bootstrap=self.build_bootstrap_spec(),
-            invocation=self.build_invocation_spec(
-                artifact_store=artifact_store,
-                run_id=run_id,
-                config_object_key=config_object_key,
-                input_manifest_key=input_manifest_key,
-                uploaded_items=uploaded_items,
-            ),
-            artifacts=(
-                ArtifactRef(name="input_manifest", key=input_manifest_key, kind="jsonl"),
-                ArtifactRef(name="config_object", key=config_object_key, kind="json"),
-            ),
-            discovered_items=discovered_items,
-            uploaded_items=uploaded_items,
-            is_resume=is_resume,
-            async_upload=async_upload,
-            metadata={
-                "pipeline_family": "ocr",
-                "input_manifest_key": input_manifest_key,
-                "config_object_key": config_object_key,
-            },
+    def load_resolved_recipe_mapping(self) -> dict[str, object]:
+        return load_resolved_recipe_mapping(
+            self.config_path,
+            self.overrides,
+            overlay_paths=self.overlay_paths,
         )
 
     def build_bootstrap_spec(self) -> BootstrapSpec:
@@ -210,27 +105,7 @@ class OcrSubmissionAdapter(SubmissionAdapter):
             ]
         )
         env = artifact_store.build_remote_env()
-        reverse_tunnels: tuple[str, ...] = ()
-        tracking_uri = self.resolve_remote_tracking_uri()
-        if tracking_uri:
-            env["MLFLOW_TRACKING_URI"] = tracking_uri
-            reverse_tunnels = (self.build_reverse_tunnel_spec(),)
-        return RemoteInvocationSpec(
-            command=command,
-            env=env,
-            reverse_tunnels=reverse_tunnels,
-        )
-
-    def resolve_remote_tracking_uri(self) -> str:
-        if not self.config.mlflow.enabled:
-            return ""
-        return f"http://127.0.0.1:{self.config.mlflow.remote_tunnel_port}"
-
-    def build_reverse_tunnel_spec(self) -> str:
-        parsed = urlparse(self.config.mlflow.local_tracking_uri)
-        if not parsed.hostname or not parsed.port:
-            raise ValueError("mlflow.local_tracking_uri must include an explicit host and port.")
-        return f"{self.config.mlflow.remote_tunnel_port}:{parsed.hostname}:{parsed.port}"
+        return RemoteInvocationSpec(command=command, env=env)
 
     def discover_pdf_paths(self, pdf_root: Path) -> list[Path]:
         if not pdf_root.is_dir():
@@ -253,13 +128,11 @@ class OcrSubmissionAdapter(SubmissionAdapter):
                     source_r2_key=join_s3_key(self.config.input.raw_pdf_prefix, relative_path),
                     relative_path=relative_path,
                     source_size_bytes=pdf_path.stat().st_size,
-                    source_page_count=self.count_pdf_pages(pdf_path),
                     source_sha256=compute_sha256_file(pdf_path),
                 )
             )
         tasks.sort(
             key=lambda task: (
-                task.source_page_count if task.source_page_count is not None else sys.maxsize,
                 task.source_size_bytes,
                 task.relative_path,
             )
@@ -267,21 +140,6 @@ class OcrSubmissionAdapter(SubmissionAdapter):
         if self.config.input.max_files is not None:
             tasks = tasks[: self.config.input.max_files]
         return tasks
-
-    def count_pdf_pages(self, pdf_path: Path) -> int | None:
-        import pypdfium2 as pdfium
-
-        try:
-            document = pdfium.PdfDocument(str(pdf_path))
-            try:
-                page_count = len(document)
-            finally:
-                document.close()
-        except Exception:
-            return None
-        if page_count <= 0:
-            return None
-        return page_count
 
     def build_async_upload_spec(
         self,
@@ -316,9 +174,9 @@ class OcrSubmissionAdapter(SubmissionAdapter):
                 "--files-from-raw",
                 str(file_list_path),
                 "--transfers",
-                "1",
+                str(self.config.input.upload_transfers),
                 "--checkers",
-                "1",
+                str(self.config.input.upload_checkers),
             ),
             cwd=str(pdf_root),
             env=self.build_rclone_env(remote_name=remote_name),
@@ -374,9 +232,3 @@ class OcrSubmissionAdapter(SubmissionAdapter):
             f"{prefix}ENDPOINT": config_values["MLFLOW_S3_ENDPOINT_URL"],
             f"{prefix}NO_CHECK_BUCKET": "true",
         }
-
-    def build_control_key(self, run_id: str, name: str) -> str:
-        return join_s3_key(self.build_run_root(run_id), f"control/{name}")
-
-    def build_run_root(self, run_id: str) -> str:
-        return join_s3_key(self.config.r2.output_prefix, run_id)

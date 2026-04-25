@@ -12,8 +12,7 @@ pass. It does **not** promise a successful remote execution —
 drags in RunPod / R2 / bootstrap specifics covered elsewhere.
 
 ```
-uv run ruff check src/training_signal_processing/pipelines/example_echo \
-                  src/training_signal_processing/custom_ops/example_echo_ops.py
+uv run ruff check src/training_signal_processing/pipelines/example_echo
 uv run lint-imports
 uv run --group remote_ocr python -m training_signal_processing.pipelines.example_echo.cli validate \
   --config src/training_signal_processing/pipelines/example_echo/configs/baseline.yaml
@@ -40,7 +39,7 @@ group has only `duckdb`; `click`, `pyyaml`, `boto3`, `ray[data]`,
 - [§3 Ops — the per-row chain](#3-ops--the-per-row-chain)
 - [§4 Execute — `PipelineRuntimeAdapter`](#4-execute--pipelineruntimeadapter)
 - [§5 Materialize — `Exporter`](#5-materialize--exporter)
-- [§6 Resume — `ResumeLedger`](#6-resume--resumeledger)
+- [§6 Resume — `OutputCompletionTracker`](#6-resume--outputcompletiontracker)
 - [§7 Submit — `SubmissionAdapter`](#7-submit--submissionadapter)
 - [§8 CLI wiring](#8-cli-wiring)
 - [§9 Recipe + first dry run](#9-recipe--first-dry-run)
@@ -55,12 +54,12 @@ A pipeline is six pieces of behavior plus CLI plumbing:
 | What you're building | Where it lives | Contract |
 |---|---|---|
 | **config schema** | `pipelines/<new>/{models,config}.py` | A `RecipeConfig` dataclass that mirrors the YAML recipe |
-| **ops** | `custom_ops/<new>_ops.py` | Subclasses of `Op` — exactly one `prepare`, ≥1 `transform`, exactly one `export` |
+| **ops** | `pipelines/<new>/ops.py` | Subclasses of `Op` — exactly one `prepare`, ≥1 `transform`, exactly one `export` |
 | **execute** | `pipelines/<new>/runtime.py` | `PipelineRuntimeAdapter` — the seam `StreamingRayExecutor` talks to |
-| **materialize** | `pipelines/<new>/exporter.py` | `Exporter` — one write per output batch |
-| **resume** | `pipelines/<new>/resume.py` | `ResumeLedger` — per-batch manifest + run-state |
+| **materialize** | `pipelines/<new>/runtime.py` | `Exporter` — one write per output batch |
+| **resume** | `pipelines/<new>/runtime.py` | `OutputCompletionTracker` — maps existing outputs back to source keys |
 | **submit** | `pipelines/<new>/submission.py` | `SubmissionAdapter` — what to sync, how to bootstrap, how to invoke remote |
-| **CLI wiring** | `pipelines/<new>/{remote_job,cli}.py` | `build_remote_job_cli` wrapper + a standalone click CLI (because `main.py` is frozen) |
+| **CLI wiring** | `pipelines/<new>/cli.py` | Local commands plus a `remote-job` command built with `build_remote_job_cli` |
 
 One canonical directory tree for the worked example:
 
@@ -72,14 +71,10 @@ src/training_signal_processing/
 │       ├── cli.py
 │       ├── config.py
 │       ├── configs/baseline.yaml
-│       ├── exporter.py
 │       ├── models.py
-│       ├── remote_job.py
-│       ├── resume.py
+│       ├── ops.py
 │       ├── runtime.py
 │       └── submission.py
-└── custom_ops/
-    └── example_echo_ops.py
 ```
 
 Narrative order below is top-down conceptual, not import-dependency
@@ -98,7 +93,7 @@ mirrors its YAML recipe. Eight framework sections are mandatory:
 list.
 
 **Why.** `StreamingRayExecutor.validate_contract`
-([runtime/executor.py:444](src/training_signal_processing/runtime/executor.py#L444))
+([core/execution.py:444](src/training_signal_processing/core/execution.py#L444))
 enforces that bindings, execution config, tracking context, and
 artifact layout all resolve — and your `RecipeConfig` is what your
 adapter projects those from. Missing sections → a
@@ -142,7 +137,7 @@ class InputConfig:
     items: list[dict[str, Any]] = field(default_factory=list)
 ```
 
-And two row types the ops + exporter + ledger all round-trip through:
+And two row types the ops + exporter all round-trip through:
 `EchoTask` (input row) at
 [models.py:45](src/training_signal_processing/pipelines/example_echo/models.py#L45)
 and `EchoResult` (output row) at
@@ -190,23 +185,21 @@ as `dataset.map_batches` transforms — lazy, concurrent, and
 batched — and the rest of the system reads their output through a
 stable row contract.
 
-**How.** `custom_ops/<pipeline>_ops.py` holds your concrete `Op`
+**How.** `pipelines/<new>/ops.py` holds your concrete `Op`
 subclasses. Registration is automatic: `Op.__init_subclass__` at
 [ops/base.py:22](src/training_signal_processing/ops/base.py#L22)
-adds every concrete subclass to the global `REGISTERED_OP_TYPES`,
-and the import-sweep at
-[custom_ops/__init__.py:13](src/training_signal_processing/custom_ops/__init__.py#L13)
-imports every `.py` in `custom_ops/` at package load. No explicit
-registration call.
+adds every concrete subclass to the global `REGISTERED_OP_TYPES`.
+Each pipeline package imports its own `ops.py` from `__init__.py`, so
+registration happens when the pipeline CLI or remote job imports the package.
 
 Two gotchas the doc flags:
 
-- **`op_name` is globally unique across all `custom_ops/*`.** If
+- **`op_name` is globally unique across all imported pipeline ops.** If
   you name your op `skip_existing`, it collides with OCR and raises
   `TypeError: Duplicate registered op name: skip_existing` at import
   time.
-- **Filenames starting with `_` are skipped.** `_echo_ops.py` would
-  silently register nothing.
+- **The pipeline package must import its ops module.** The template does
+  this in `pipelines/<new>/__init__.py` with `from . import ops as ops`.
 
 Stage templates live in
 [ops/builtin.py](src/training_signal_processing/ops/builtin.py):
@@ -220,7 +213,7 @@ despite the OCR-flavored names.
 `example_echo` has three ops:
 
 ```python
-# custom_ops/example_echo_ops.py:29
+# pipelines/example_echo/ops.py:29
 class PrepareEchoOp(SourcePreparationOp):
     op_name = "prepare_echo"
 
@@ -242,12 +235,12 @@ class PrepareEchoOp(SourcePreparationOp):
 ```
 
 `PrepareEchoOp` converts the raw `EchoTask` input into the canonical
-row shape. Every downstream op + the exporter + the ledger round-trip
-through this shape, so **fields are initialized with sane defaults
+row shape. Every downstream op + the exporter round-trip through
+this shape, so **fields are initialized with sane defaults
 up front**. `status="pending"` means the transform hasn't run yet.
 
 ```python
-# custom_ops/example_echo_ops.py:54
+# pipelines/example_echo/ops.py:54
 class TimestampEchoOp(BatchTransformOp):
     op_name = "timestamp_echo"
 
@@ -272,11 +265,11 @@ class TimestampEchoOp(BatchTransformOp):
 `TimestampEchoOp` promotes status to `"success"` (or `"failed"` on
 exception). Row mutations are additive — we never remove keys —
 because **non-idempotent mutation breaks resume semantics**: if a
-batch re-runs after a crash, keys disappearing would confuse
-`ResumeLedger.commit_batch`'s `EchoResult.from_dict(row)` call.
+batch re-runs after a crash, keys disappearing would confuse the
+exporter's `EchoResult.from_dict(row)` call.
 
 ```python
-# custom_ops/example_echo_ops.py:77
+# pipelines/example_echo/ops.py:77
 class ExportEchoOp(RowWiseMapperOp):
     op_name = "export_echo"
     op_stage = "export"
@@ -296,9 +289,8 @@ R2 write happens once per batch in `EchoExporter.export_batch`
 (§5) — not per row. This split is the framework's convention: ops
 stay pure and parallel; I/O is centralized in the exporter, which
 runs on the driver once per batch after Ray materializes. Writes go
-through `self._put_bytes` — synchronous by default, or queued onto
-the async upload coordinator if one is active (see ARCHITECTURE.md
-§6.1).
+through `self._put_bytes`, which is synchronous; the executor records
+batch progress only after output writes return successfully.
 
 `RowWiseMapperOp` is re-used directly here (instead of the OCR-flavored
 `ExportMarkdownMapper`) to demonstrate that `op_stage` can be set
@@ -321,9 +313,8 @@ Keeping this layer purely declarative means the frozen
 
 **How.** One file —
 [pipelines/example_echo/runtime.py](src/training_signal_processing/pipelines/example_echo/runtime.py)
-— subclasses `PipelineRuntimeAdapter`. The class starts at
-[runtime.py:23](src/training_signal_processing/pipelines/example_echo/runtime.py#L23);
-key methods:
+— defines the batch exporter and subclasses `PipelineRuntimeAdapter`.
+Key adapter methods:
 
 ```python
 # runtime.py:62
@@ -332,7 +323,7 @@ def load_input_rows(self) -> list[dict[str, object]]:
 ```
 
 The ABC at
-[executor.py:71](src/training_signal_processing/runtime/executor.py#L71)
+[executor.py:71](src/training_signal_processing/core/execution.py#L71)
 declares `list[dict[str, Any]]` as the return type, but all three
 other pipelines override with `list[dict[str, object]]` —
 `example_echo` follows that concrete convention. The
@@ -344,7 +335,7 @@ submission adapter's `prepare_new_run` (§7).
 def get_tracking_context(self) -> RuntimeTrackingContext:
     return RuntimeTrackingContext(
         enabled=self.config.mlflow.enabled,
-        tracking_uri=os.environ.get("MLFLOW_TRACKING_URI", ""),
+        tracking_uri=self.config.mlflow.tracking_uri,
         experiment_name=self.config.mlflow.experiment_name,
         run_name=self.config.run_name,
         executor_type=self.config.ray.executor_type,
@@ -356,19 +347,17 @@ def get_tracking_context(self) -> RuntimeTrackingContext:
 
 Note: `example_echo` does NOT override
 `resolve_transform_resources`. The base default at
-[executor.py:101](src/training_signal_processing/runtime/executor.py#L101)
+[executor.py:101](src/training_signal_processing/core/execution.py#L101)
 returns an empty `RayTransformResources` (no GPU, no CPU pin).
 Override only if one of your ops needs a GPU — OCR does
 ([pipelines/ocr/runtime.py:105](src/training_signal_processing/pipelines/ocr/runtime.py#L105))
 to give `marker_ocr` the configured `marker_ocr_resources`.
 
-The other adapter methods
-(`get_run_bindings`, `get_execution_config`, `get_op_configs`,
-`get_artifact_layout`, `build_runtime_context`, `build_op_registry`,
-`build_exporter`, `build_resume_ledger`,
-`resolve_completed_item_keys`) are mechanical projections from
-`RecipeConfig` + `bindings` + `object_store`. Read the 95-line file
-directly.
+Use `ObjectStorePipelineRuntimeAdapter` for normal R2-backed pipelines. It owns
+the mechanical projections from `RecipeConfig` + `bindings` + `object_store`;
+your runtime class usually implements only `source_root_key`, `build_exporter`,
+and `build_completion_tracker`, plus `resolve_transform_resources` when an op
+needs explicit Ray resources.
 
 ---
 
@@ -376,8 +365,9 @@ directly.
 
 **What.** `Exporter.export_batch(batch_id, rows)` runs once per
 batch after Ray materializes. It's where actual I/O happens — write
-outputs for each successful row. `finalize_run(run_state)` writes a
-final summary object after all batches are committed.
+outputs for each successful row. `finalize_run(run_state)` is an optional
+in-memory lifecycle hook; the base `RayExporter` does not write a final
+checkpoint object.
 
 **Why.** Separating "what goes out" from "what ops compute" lets ops
 stay pure and parallel. The exporter is called from the main
@@ -385,11 +375,11 @@ executor (driver) thread, not inside a Ray worker — so it's the one
 place in the pipeline that can safely do bulk I/O without shipping
 credentials or clients across process boundaries.
 
-**How.** One file — 42 lines —
-[pipelines/example_echo/exporter.py](src/training_signal_processing/pipelines/example_echo/exporter.py):
+**How.** The exporter lives beside the runtime adapter in
+[pipelines/example_echo/runtime.py](src/training_signal_processing/pipelines/example_echo/runtime.py):
 
 ```python
-# exporter.py:16
+# runtime.py
 def export_batch(self, batch_id: str, rows: list[dict[str, object]]) -> ExportBatchResult:
     output_keys: list[str] = []
     for row in rows:
@@ -415,83 +405,45 @@ def export_batch(self, batch_id: str, rows: list[dict[str, object]]) -> ExportBa
 
 Three conventions:
 
-- **Filter by `status`.** The ledger writes every row (including
-  failed ones) to the per-batch manifest, but the exporter only
-  writes success rows to the output namespace.
+- **Filter by `status`.** The exporter only writes success rows to
+  the output namespace; failed rows contribute to in-memory progress
+  and optional observability, not durable checkpoint files.
 - **`output_r2_key` was computed in `PrepareEchoOp`.** The
   exporter trusts the pre-populated key rather than rebuilding it,
   so the convention is "prepare decides where things land; exporter
   just puts them there."
 - **Write via `self._put_bytes`.** The helper on
-  [`RayExporter`](src/training_signal_processing/runtime/exporter.py#L21)
-  routes to the async upload coordinator when one is attached
-  (opt-in via `ray.async_upload` in the recipe), and falls back to
-  synchronous `self.object_store.write_bytes` otherwise. Either way
-  the exporter code is identical; the executor handles the
-  drain-before-commit semantics (see ARCHITECTURE.md §6.1) so
-  failed uploads surface as run failures before the ledger records
-  anything.
-
-`finalize_run` at
-[exporter.py:38](src/training_signal_processing/pipelines/example_echo/exporter.py#L38)
-writes `run.json` with the final `RunState` snapshot — identical
-shape across every pipeline. It's called after the last batch
-commits and uses sync `object_store.write_json` (not routed
-through the coordinator) because it's a single write off the hot
-path.
+  [`RayExporter`](src/training_signal_processing/core/execution.py)
+  calls synchronous `self.object_store.write_bytes`. The exporter
+  returns only after output objects are durable, so failed writes
+  surface as run failures before the executor records in-memory batch progress.
 
 ---
 
-## §6 Resume — `ResumeLedger`
+## §6 Resume — `OutputCompletionTracker`
 
-**What.** Writes three R2 objects per batch:
-`manifests/<batch_id>.jsonl` (the rows), `events/<batch_id>.json`
-(per-batch counters), and an updated `run_state.json`. Reads them
-back to answer "what's already done?" on resume.
+**What.** `OutputCompletionTracker` lists materialized output objects for the
+run and maps each expected output back to the source key in the input manifest.
+If the expected output exists, the source key is considered complete.
 
-**Why.** Long runs crash; without a ledger every retry reprocesses
-everything. Atomic per-batch writes mean a restart resumes from the
-latest committed batch with zero rework.
+**Why.** The output object is the durable fact the pipeline actually cares
+about. Avoiding separate batch manifests, event objects, `run_state.json`, and
+`run.json` keeps resume behavior easy to reason about: a restart skips exactly
+the sources whose outputs are already present.
 
-**How.** 173 lines in
-[pipelines/example_echo/resume.py](src/training_signal_processing/pipelines/example_echo/resume.py).
-Eight abstract methods; the pipeline-specific variations are:
+**How.** Put a tiny tracker class beside your exporter in
+`pipelines/<new>/runtime.py`. Implement:
 
-- `load_completed_item_keys` reads per-batch manifests, filters to
-  `status == "success"`, and collects the **idempotency key** —
-  for `example_echo` this is `source_id`
-  ([resume.py:41](src/training_signal_processing/pipelines/example_echo/resume.py#L41)):
+```python
+def source_key_for_input(self, row: dict[str, object]) -> str: ...
+def output_key_for_input(self, row: dict[str, object], layout: RunArtifactLayout) -> str: ...
+def output_listing_prefix(self, layout: RunArtifactLayout) -> str: ...
+```
 
-  ```python
-  def load_completed_item_keys(self, run_id: str) -> set[str]:
-      ...
-      for row in self.object_store.read_jsonl(key):
-          result = EchoResult.from_dict(row)
-          if result.status == "success":
-              completed_keys.add(result.source_id)
-      return completed_keys
-  ```
-
-  This set is handed to the runtime context
-  ([runtime.py:79](src/training_signal_processing/pipelines/example_echo/runtime.py#L79))
-  and consulted by any `SkipExistingFilter` op. `example_echo` doesn't
-  have a filter op (three ops is the minimum), so resume works but
-  doesn't actually skip — OCR uses `SkipExistingDocumentsOp`
-  ([custom_ops/user_ops.py:238](src/training_signal_processing/custom_ops/user_ops.py#L238))
-  to make the filter material.
-- `commit_batch` at
-  [resume.py:84](src/training_signal_processing/pipelines/example_echo/resume.py#L84)
-  builds an `EchoResult` from each row, counts by status, and writes
-  manifest + event + updated run state.
-- `find_latest_partial_run` at
-  [resume.py:18](src/training_signal_processing/pipelines/example_echo/resume.py#L18)
-  filters `list_keys` output to `*/run_state.json` keys, sorts
-  descending, and returns the first whose status is `running` or
-  `partial` — cross-link to [ARCHITECTURE.md §11](ARCHITECTURE.md)
-  for the rationale.
-
-Everything else is mechanical; start from this file and you have a
-working ledger.
+The executor calls `completed_source_keys(input_rows, artifact_layout,
+allow_overwrite)` at startup. If `allow_overwrite` is true, the completed set is
+empty. Otherwise the set is handed to the runtime context and consulted by skip
+ops such as OCR's `SkipExistingDocumentsOp`.
 
 ---
 
@@ -500,52 +452,57 @@ working ledger.
 **What.** Builds a `PreparedRun` describing what to sync, how to
 bootstrap, how to invoke remotely, and what artifacts were written.
 The framework's `SubmissionCoordinator` drives the rest (rsync, SSH
-bootstrap, SSH execute).
+bootstrap, local upload waits, and detached SSH launch).
 
 **Why.** Submission orchestration is pipeline-agnostic; the adapter's
 job is narrow and purely declarative. You provide the input manifest
 + recipe JSON in R2, the bootstrap shell, and the remote invocation
 command. The coordinator at
-[runtime/submission.py:492](src/training_signal_processing/runtime/submission.py#L492)
-takes it from there.
+[core/submission.py:492](src/training_signal_processing/core/submission.py#L492)
+takes it from there. The coordinator is fire-and-forget
+(`.submit()` returns a `LaunchHandle` once `setsid` writes `job.pgid`
+on the pod). Your adapter's declarative output is the bootstrap,
+invocation, artifacts, and any local input upload spec.
 
-**How.** 181 lines in
+**How.** The common `SubmissionAdapter.prepare_new_run` and
+`prepare_resume_run` methods own run-id creation, control keys,
+manifest/config writes, and `PreparedRun` construction. Your concrete
+adapter implements the pipeline hooks: `pipeline_family`,
+`build_new_run_manifest`, `load_resolved_recipe_mapping`,
+`build_bootstrap_spec`, and `build_invocation_spec`.
+
+The worked example lives in
 [pipelines/example_echo/submission.py](src/training_signal_processing/pipelines/example_echo/submission.py).
-Three ABC methods + helpers.
 
-**`prepare_new_run` (`submission.py:35`)** materializes the inputs.
+**`build_new_run_manifest`** materializes the inputs.
 It iterates `config.input.items`, builds `EchoTask` dataclasses, and
-writes them to R2 as a JSONL manifest at
-`<output_prefix>/<run_id>/control/input_manifest.jsonl`. It also
-writes the fully-resolved recipe JSON so the remote process can
-rebuild the config from R2:
+writes rows through the core template as a JSONL control manifest at
+`<output_prefix>/<run_id>/control/input_manifest.jsonl`. The core
+template also writes the fully-resolved recipe JSON so the remote
+process can rebuild the config from R2:
 
 ```python
-# submission.py:35
-def prepare_new_run(self, artifact_store: ArtifactStore, *, dry_run: bool) -> PreparedRun:
-    run_id = utc_timestamp()
-    input_manifest_key = self.build_control_key(run_id, "input_manifest.jsonl")
-    config_object_key = self.build_control_key(run_id, "recipe.json")
+def build_new_run_manifest(
+    self,
+    *,
+    artifact_store: ArtifactStore,
+    run_id: str,
+    dry_run: bool,
+) -> SubmissionManifest:
+    del artifact_store, run_id, dry_run
     tasks = self.build_tasks()
-    if not dry_run:
-        artifact_store.write_jsonl(input_manifest_key, [task.to_dict() for task in tasks])
-        artifact_store.write_json(
-            config_object_key,
-            load_resolved_recipe_mapping(
-                self.config_path, self.overrides, overlay_paths=self.overlay_paths,
-            ),
-        )
-    return self.build_prepared_run(...)
+    return SubmissionManifest(
+        rows=[task.to_dict() for task in tasks],
+        discovered_items=len(tasks),
+    )
 ```
 
 **Honesty paragraph — input discovery.** `example_echo.input.items`
 is a list of dicts **hardcoded in the YAML**. That's the minimum
 contract-satisfying pattern; real pipelines discover inputs from an
-external system. Compare with the richer patterns at
-[pipelines/youtube_asr/submission.py:214-253](src/training_signal_processing/pipelines/youtube_asr/submission.py#L214-L253)
-(channel URLs → yt-dlp entry listing → media download) and
-[pipelines/ocr/submission.py:212-248](src/training_signal_processing/pipelines/ocr/submission.py#L212-L248)
-(PDF glob + page-count sort). The framework only requires that your
+external system. Compare with OCR's richer pattern at
+[pipelines/ocr/submission.py](src/training_signal_processing/pipelines/ocr/submission.py)
+(PDF glob + file-size sort). The framework only requires that your
 adapter writes `input_manifest.jsonl` before the remote job starts;
 how you build that list is your pipeline's business.
 
@@ -570,21 +527,20 @@ for torch; `example_echo` doesn't need it.
 
 **`build_invocation_spec` (`submission.py:126`)** returns the remote
 command. Three things matter:
-- The command invokes **the pipeline's own `remote_job.py`** via
-  `python -m`. `main.py` is frozen; only OCR's `ocr-remote-job`
-  lives there.
-- The env includes R2 + MLflow exports from
-  `artifact_store.build_remote_env` (not shown here — generic).
-- If MLflow is enabled, add a reverse tunnel via
-  `build_reverse_tunnel_spec` at
-  [submission.py:167](src/training_signal_processing/pipelines/example_echo/submission.py#L167)
-  so the remote process can reach the operator's local MLflow server.
+- Non-OCR pipelines invoke `python -m
+  training_signal_processing.pipelines.<name>.cli remote-job`.
+  OCR keeps the stable root command `python -m
+  training_signal_processing.main ocr-remote-job`.
+- The env includes R2 exports from `artifact_store.build_remote_env`
+  when the pipeline needs remote R2 access.
+- MLflow is optional and direct-only: set `mlflow.enabled=true` plus
+  a `mlflow.tracking_uri` reachable from the logging process. The
+  framework does not open SSH tunnels.
 
-**`parse_remote_summary` (`submission.py:76`)** is
-`json.loads(stdout.strip())` — the remote job prints the executor
-summary as JSON.
+Submission does not parse remote stdout. The remote job writes outputs
+to R2; the detached log contains any printed JSON summary.
 
-No rclone, no local file upload, no page-count sort — `example_echo`
+No rclone, no local file upload, no file-size sort — `example_echo`
 keeps the submission adapter minimal. For a pipeline that uploads
 local binaries, crib the rclone block at
 [pipelines/ocr/submission.py:263-353](src/training_signal_processing/pipelines/ocr/submission.py#L263).
@@ -593,8 +549,9 @@ local binaries, crib the rclone block at
 
 ## §8 CLI wiring
 
-**What.** Two tiny files. `remote_job.py` is what gets invoked on
-the remote box; `cli.py` is what operators run locally.
+**What.** One `cli.py` file. Operators run `validate`, `run`, and
+`resume` locally; the remote box runs the same module's `remote-job`
+subcommand.
 
 **Why.** `main.py` is frozen
 ([ARCHITECTURE.md §3](ARCHITECTURE.md)) and only carries OCR's CLI
@@ -603,39 +560,37 @@ you cannot edit `main.py` to add yours.
 
 **How.**
 
-`remote_job.py` — 34 lines, 95% boilerplate — wraps the runtime's
-`build_remote_job_cli` factory:
+`cli.py` registers the remote subcommand with
+`build_remote_job_cli`:
 
 ```python
-# pipelines/example_echo/remote_job.py:11
-def _build_adapter(
+# pipelines/example_echo/cli.py
+def build_adapter(
     config: RecipeConfig,
     bindings: RuntimeRunBindings,
     object_store: R2ObjectStore,
-) -> EchoPipelineRuntimeAdapter:
-    return EchoPipelineRuntimeAdapter(
-        config=config, bindings=bindings, object_store=object_store,
-    )
+):
+    return build_runtime_adapter(config, bindings, object_store)
 
 
-cli = build_remote_job_cli(
-    recipe_loader=build_recipe_config,
-    adapter_factory=_build_adapter,
+cli.add_command(
+    build_remote_job_cli(
+        recipe_loader=build_recipe_config,
+        adapter_factory=build_adapter,
+    ),
+    name="remote-job",
 )
 ```
 
 `build_remote_job_cli` at
-[runtime/remote_job.py](src/training_signal_processing/runtime/remote_job.py)
+[core/remote.py](src/training_signal_processing/core/remote.py)
 handles the R2 bootstrap config fetch, `RuntimeRunBindings`
 construction, and executor start. You pass the recipe loader + the
 adapter factory; the runtime handles the rest.
 
-`cli.py` — 134 lines — is a click group with three commands:
-`validate`, `run`, `resume`. Each takes `--config` (multiple — for
-overlay files) and `--set` (dotted-path overrides). The shape is
-identical to
-[pipelines/youtube_asr/cli.py](src/training_signal_processing/pipelines/youtube_asr/cli.py);
-copy it verbatim and change the adapter + recipe-loader references.
+The local commands take `--config` (multiple — for overlay files)
+and `--set` (dotted-path overrides). Copy the example_echo CLI shape
+and change the adapter + recipe-loader references.
 
 ```python
 # cli.py:28
@@ -659,6 +614,12 @@ The `submit_remote_pipeline` helper at
 assembles the `SubmissionCoordinator` and calls `.submit()`. This is
 the same pattern OCR's `main.py` uses — only the adapter class
 changes.
+
+**Return-value contract.** `.submit()` returns a
+`SubmissionResult(mode='launched', launch: LaunchHandle)`. Wire the
+CLI to print `.to_safe_dict()` as before; the launch handle gives the
+operator the remote log path and pgid path. Run completion is read
+from R2 state, not SSH stdout.
 
 ---
 
@@ -697,8 +658,7 @@ ops:
 Validate + dry-run in order:
 
 ```
-uv run ruff check src/training_signal_processing/pipelines/example_echo \
-                  src/training_signal_processing/custom_ops/example_echo_ops.py
+uv run ruff check src/training_signal_processing/pipelines/example_echo
 uv run lint-imports
 uv run --group remote_ocr python -m training_signal_processing.pipelines.example_echo.cli validate \
   --config src/training_signal_processing/pipelines/example_echo/configs/baseline.yaml
@@ -725,20 +685,16 @@ etc.
 
 Before running a real (non-dry) remote run, tick all of:
 
-- [ ] `custom_ops/<new>_ops.py` filename does NOT start with `_`
-      ([custom_ops/__init__.py:13](src/training_signal_processing/custom_ops/__init__.py#L13)).
+- [ ] `pipelines/<new>/__init__.py` imports `ops.py` so concrete op classes register.
 - [ ] Each concrete `Op` subclass declares `op_name` + `op_stage`
-      (exactly one `prepare`, exactly one `export`, ≥1 `transform`).
-- [ ] Every `op_name` is globally unique — no collisions with OCR /
-      tokenizer / youtube_asr.
+      (exactly one `prepare`, zero or one `export`, ≥1 `transform`).
+- [ ] Every `op_name` is globally unique — no collisions with OCR or example_echo.
 - [ ] Your recipe's `ops:` list references the `op_name` strings and
       sets `type:` per op.
-- [ ] `uv run lint-imports` passes — your code should not have added
-      any import from `core/`, `ops/`, `runtime/`, `storage/` that
-      reaches back into `pipelines/`. (`custom_ops/` is unconstrained —
-      it's free to import `pipelines/<new>/models`.)
-- [ ] `validate_recipe_constraints` rejects empty `input.items` and
-      other obviously-bad inputs.
+- [ ] `uv run lint-imports` passes — shared `core/` and `ops/` code must not
+      import back into `pipelines/`.
+- [ ] Config loading fails clearly for missing required sections and
+      obviously-bad pipeline-owned inputs.
 - [ ] No frozen file was edited
       ([ARCHITECTURE.md §3](ARCHITECTURE.md)).
 
@@ -764,12 +720,12 @@ one-sentence rationale so you know where to look instead.
 - **MLflow / observability semantics.** Covered in
   [ARCHITECTURE.md §10](ARCHITECTURE.md); your adapter just exposes
   `tracking_context` and the runtime handles the rest.
-- **`allow_overwrite` + resume-replay interactions.** The
-  `resolve_completed_item_keys` hook supports it, but the invariants
-  need more words than fit here.
+- **`allow_overwrite` + resume-replay interactions.**
+  `OutputCompletionTracker.completed_source_keys` returns an empty
+  set when overwrite is allowed, so skip ops reprocess every source.
 - **Custom `DatasetBuilder`.** The default
   `ConfiguredRayDatasetBuilder`
-  ([runtime/dataset.py:132](src/training_signal_processing/runtime/dataset.py#L132))
+  ([core/dataset.py:132](src/training_signal_processing/core/dataset.py#L132))
   works for everything except custom pyarrow ingestion.
 - **Per-op resource overrides (`resolve_transform_resources`).**
   Skipped for `example_echo` because all three ops are CPU-only;

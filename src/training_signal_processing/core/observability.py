@@ -3,12 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
 import sys
 from abc import ABC, abstractmethod
 
-from ..core.models import BatchCommit, ExecutionLogEvent, RunState, RuntimeTrackingContext
 from ..ops.base import Op
+from .models import BatchProgress, ExecutionLogEvent, RunState, RuntimeTrackingContext
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
 
@@ -90,9 +89,18 @@ class MlflowExecutionLogger(StructuredExecutionLogger):
         import mlflow
         from mlflow.tracking import MlflowClient
 
-        tracking_uri = os.environ.get("MLFLOW_TRACKING_URI") or self.tracking.tracking_uri
+        tracking_uri = self.resolve_tracking_uri()
         mlflow.set_tracking_uri(tracking_uri)
         return MlflowClient(tracking_uri=tracking_uri)
+
+    def resolve_tracking_uri(self) -> str:
+        tracking_uri = self.tracking.tracking_uri.strip()
+        if not tracking_uri:
+            raise ValueError(
+                "mlflow.tracking_uri is required when mlflow.enabled=true; "
+                "reverse-tunnel MLflow was removed."
+            )
+        return tracking_uri
 
 
 class Tracer(ABC):
@@ -195,7 +203,7 @@ class ProgressTracker(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def log_batch_commit(self, batch_commit: BatchCommit, run_state: RunState) -> None:
+    def log_batch_progress(self, batch_progress: BatchProgress, run_state: RunState) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -233,7 +241,7 @@ class ProgressReporter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def commit_batch(self, batch_commit: BatchCommit, run_state: RunState) -> None:
+    def finish_batch(self, batch_progress: BatchProgress, run_state: RunState) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -261,7 +269,7 @@ class NullProgressReporter(ProgressReporter):
     def finish_op(self, batch_id: str, op_name: str, output_row_count: int) -> None:
         return None
 
-    def commit_batch(self, batch_commit: BatchCommit, run_state: RunState) -> None:
+    def finish_batch(self, batch_progress: BatchProgress, run_state: RunState) -> None:
         return None
 
     def finish_run(self, status: str) -> None:
@@ -332,7 +340,7 @@ class TqdmProgressReporter(ProgressReporter):
             f"[op:finish] batch_id={batch_id} op={op_name} output_rows={output_row_count}"
         )
 
-    def commit_batch(self, batch_commit: BatchCommit, run_state: RunState) -> None:
+    def finish_batch(self, batch_progress: BatchProgress, run_state: RunState) -> None:
         if self.progress_bar is not None:
             self.progress_bar.update(1)
             self.progress_bar.set_postfix(
@@ -342,11 +350,11 @@ class TqdmProgressReporter(ProgressReporter):
                 pending=run_state.pending_items,
             )
         self.write_line(
-            "[batch:commit] "
-            f"batch_id={batch_commit.batch_id} "
-            f"success={batch_commit.success_count} "
-            f"failed={batch_commit.failed_count} "
-            f"skipped={batch_commit.skipped_count} "
+            "[batch:finish] "
+            f"batch_id={batch_progress.batch_id} "
+            f"success={batch_progress.success_count} "
+            f"failed={batch_progress.failed_count} "
+            f"skipped={batch_progress.skipped_count} "
             f"pending_items={run_state.pending_items}"
         )
 
@@ -415,7 +423,7 @@ class MlflowProgressTracker(ProgressTrackerActor):
         )
         return self.mlflow_run_id
 
-    def log_batch_commit(self, batch_commit: BatchCommit, run_state: RunState) -> None:
+    def log_batch_progress(self, batch_progress: BatchProgress, run_state: RunState) -> None:
         if self.mlflow_enabled:
             self.mlflow.log_metrics(
                 {
@@ -423,19 +431,19 @@ class MlflowProgressTracker(ProgressTrackerActor):
                     "failed_count": run_state.failed_count,
                     "skipped_count": run_state.skipped_count,
                     "pending_items": run_state.pending_items,
-                    "batch_duration_sec": batch_commit.duration_sec,
+                    "batch_duration_sec": batch_progress.duration_sec,
                 },
                 step=run_state.last_committed_batch,
             )
         self.logger.log_event(
             ExecutionLogEvent(
                 level="INFO",
-                code="progress.batch.commit",
-                message=f"Committed batch '{batch_commit.batch_id}'.",
+                code="progress.batch.finish",
+                message=f"Finished batch '{batch_progress.batch_id}'.",
                 run_id=run_state.run_id,
-                batch_id=batch_commit.batch_id,
+                batch_id=batch_progress.batch_id,
                 details={
-                    "batch_commit": batch_commit.to_dict(),
+                    "batch_progress": batch_progress.to_dict(),
                     "run_state": run_state.to_dict(),
                 },
             )
@@ -473,7 +481,7 @@ class MlflowProgressTracker(ProgressTrackerActor):
     def create_mlflow_run_id(self) -> str:
         if not self.mlflow_enabled:
             return f"disabled:{self.pipeline_run_id}"
-        tracking_uri = os.environ.get("MLFLOW_TRACKING_URI") or self.tracking.tracking_uri
+        tracking_uri = self.resolve_tracking_uri()
         import mlflow
 
         mlflow.set_tracking_uri(tracking_uri)
@@ -485,6 +493,15 @@ class MlflowProgressTracker(ProgressTrackerActor):
         import mlflow
 
         return mlflow
+
+    def resolve_tracking_uri(self) -> str:
+        tracking_uri = self.tracking.tracking_uri.strip()
+        if not tracking_uri:
+            raise ValueError(
+                "mlflow.tracking_uri is required when mlflow.enabled=true; "
+                "reverse-tunnel MLflow was removed."
+            )
+        return tracking_uri
 
 
 def resolve_log_level(level: str) -> int:
@@ -499,3 +516,21 @@ def resolve_log_level(level: str) -> int:
         return mapping[level.upper()]
     except KeyError as exc:
         raise ValueError(f"Unsupported log level: {level}") from exc
+
+
+__all__ = [
+    "ExecutionLogger",
+    "MlflowExecutionLogger",
+    "MlflowProgressTracker",
+    "Monitor",
+    "NullProgressReporter",
+    "ProgressReporter",
+    "ProgressTracker",
+    "ProgressTrackerActor",
+    "StructuredExecutionLogger",
+    "StructuredMonitor",
+    "StructuredTracer",
+    "Tracer",
+    "TqdmProgressReporter",
+    "resolve_log_level",
+]

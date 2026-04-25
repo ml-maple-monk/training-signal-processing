@@ -18,14 +18,19 @@ class SshConfig:
 class RemoteRuntimeConfig:
     root_dir: str
     python_version: str
+    remote_jobs_root: str
+    pgid_wait_attempts: int
+    pgid_wait_sleep_seconds: float
+    sync_paths: tuple[str, ...]
     venv_dir: str = ".venv"
 
-
-@dataclass
-class AsyncUploadConfig:
-    enabled: bool = True
-    max_in_flight: int = 8
-    max_queued: int = 32
+    def __post_init__(self) -> None:
+        if not isinstance(self.sync_paths, (list, tuple)):
+            raise ValueError("remote.sync_paths must be a non-empty list of paths.")
+        sync_paths = tuple(str(path).strip() for path in self.sync_paths)
+        if not sync_paths or any(not path for path in sync_paths):
+            raise ValueError("remote.sync_paths must be a non-empty list of paths.")
+        self.sync_paths = sync_paths
 
 
 @dataclass
@@ -34,7 +39,6 @@ class RayConfig:
     batch_size: int
     concurrency: int
     target_num_blocks: int
-    async_upload: AsyncUploadConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -61,9 +65,8 @@ class R2Config:
 @dataclass
 class MlflowConfig:
     enabled: bool
-    local_tracking_uri: str
-    remote_tunnel_port: int
     experiment_name: str
+    tracking_uri: str = ""
 
 
 @dataclass
@@ -81,7 +84,7 @@ class OpConfig:
 
 
 @dataclass
-class BatchCommit:
+class BatchProgress:
     batch_id: str
     input_row_count: int
     output_row_count: int
@@ -89,8 +92,6 @@ class BatchCommit:
     failed_count: int
     skipped_count: int
     duration_sec: float
-    manifest_key: str
-    event_key: str
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -242,10 +243,10 @@ class OpTestResult:
 class OpRuntimeContext:
     config: Any
     run_id: str
-    object_store: Any
+    object_store: Any | None
     output_root_key: str
     source_root_key: str
-    completed_item_keys: set[str] = field(default_factory=set)
+    completed_source_keys: set[str] = field(default_factory=set)
     allow_overwrite: bool = False
     logger: Any = None
 
@@ -254,22 +255,9 @@ class OpRuntimeContext:
             "run_id": self.run_id,
             "output_root_key": self.output_root_key,
             "source_root_key": self.source_root_key,
-            "completed_item_keys": sorted(self.completed_item_keys),
+            "completed_source_keys": sorted(self.completed_source_keys),
             "allow_overwrite": self.allow_overwrite,
         }
-
-    def get_object_store(self):  # type: ignore[no-untyped-def]
-        if self.object_store is not None:
-            return self.object_store
-        import os
-
-        from ..storage.object_store import R2ObjectStore
-
-        if os.environ.get("R2_ACCESS_KEY_ID"):
-            self.object_store = R2ObjectStore.from_environment(self.config.r2)
-        else:
-            self.object_store = R2ObjectStore.from_config_file(self.config.r2)
-        return self.object_store
 
     def __getstate__(self) -> dict[str, Any]:
         state = dict(self.__dict__)
