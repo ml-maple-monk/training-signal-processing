@@ -5,18 +5,18 @@ shared runtime core and separate pipeline families.
 
 The intended user customization surface is small:
 - recipes live in `config/`
-- custom ops live in `src/training_signal_processing/custom_ops/`
 - new pipeline families live under `src/training_signal_processing/pipelines/`
-- additional backend-specific op modules can also live in `src/training_signal_processing/custom_ops/`
+- pipeline-specific ops live inside that pipeline package, for example
+  `src/training_signal_processing/pipelines/ocr/ops.py`
 
 Start here:
-- pipeline guide: [src/training_signal_processing/custom_ops/README.md](src/training_signal_processing/custom_ops/README.md)
+- extension guide: [EXTENDING.md](EXTENDING.md)
+- architecture guide: [ARCHITECTURE.md](ARCHITECTURE.md)
 - sample recipe: [config/remote_ocr.sample.yaml](config/remote_ocr.sample.yaml)
 
-Any non-underscore Python module added to `src/training_signal_processing/custom_ops/`
-is auto-imported and can register new ops without editing the protected executor or registry code.
 Any new pipeline family should be added under `src/training_signal_processing/pipelines/`
-without editing `src/training_signal_processing/runtime/submission.py`.
+without editing the protected `core/` runtime, submission, storage, or execution
+modules.
 
 ## Runtime Boundary
 
@@ -26,34 +26,35 @@ The package-level wrapper `python -m training_signal_processing ...` is not supp
 
 Editable surfaces:
 - `config/`: YAML recipes and run-time tuning values
-- `src/training_signal_processing/custom_ops/`: user-defined ops
-- `src/training_signal_processing/pipelines/<family>/`: pipeline-family schemas, exporters, ledgers, and remote jobs
+- `src/training_signal_processing/pipelines/<family>/`: pipeline-family schemas,
+  ops, exporters, ledgers, submission adapters, and remote jobs
 
 Protected infrastructure:
 - `src/training_signal_processing/main.py`: CLI entrypoint
-- `src/training_signal_processing/core/`: shared typed runtime models and utilities
-- `src/training_signal_processing/runtime/`: generic executor, submission, resume, and observability flow
-- `src/training_signal_processing/storage/`: object-store infrastructure
+- `src/training_signal_processing/core/`: shared executor, submission, storage,
+  checkpoint, observability, typed models, and utilities
 - `src/training_signal_processing/ops/`: shared op base classes and registry
 
-The `runtime/` package is intentionally pipeline-generic:
+The `core/` package is intentionally pipeline-generic:
 - it must not import `pipelines.ocr` or any other concrete pipeline package
-- it owns generic contracts such as submission orchestration, executor flow, exporter interfaces, resume interfaces, and observability
+- it owns generic contracts such as submission orchestration, executor flow,
+  object storage, exporter interfaces, checkpoint interfaces, and observability
 - it should only depend on neutral runtime types like run bindings, artifact layout, and tracking context
 
 Concrete behavior belongs in a pipeline family package:
 - row schemas, dataset semantics, exporters, ledgers, and remote jobs live in `pipelines/<name>/`
 - OCR-specific behavior lives in `pipelines/ocr/`
-- user-customized OCR transforms still belong in `custom_ops/`
+- user-customized OCR transforms belong in `pipelines/ocr/ops.py` or in a new
+  pipeline package, depending on ownership
 
 ## Boundary Enforcement
 
-The shared layers (`core/`, `ops/`, `runtime/`, `storage/`) must never import from `pipelines/`.
+The shared layers (`core/`, `ops/`) must never import from `pipelines/`.
 That invariant is enforced as a declarative architectural contract via
 [import-linter](https://import-linter.readthedocs.io/), declared in `pyproject.toml` under
 `[tool.importlinter]` and executed by `test_runtime_modules_do_not_import_pipeline_packages`
 in [tests/test_runtime_generic.py](tests/test_runtime_generic.py). The contract detects
-both direct and transitive leaks (e.g. `runtime -> storage -> pipelines.ocr`) and
+both direct and transitive leaks (e.g. `core -> ops -> pipelines.ocr`) and
 fails with the full import chain.
 
 Run it directly:
@@ -174,29 +175,33 @@ uv run --group remote_ocr python -m training_signal_processing.pipelines.tokeniz
 ## Project Shape
 
 - `config/`: YAML recipes
-- `src/training_signal_processing/custom_ops/`: user-defined ops and the customization README
 - `src/training_signal_processing/pipelines/`: pipeline-family packages such as OCR and tokenizer
-- `src/training_signal_processing/core/`: protected shared dataclasses and utility helpers
-- `src/training_signal_processing/runtime/`: protected shared runtime infrastructure with no pipeline-specific imports
-- `src/training_signal_processing/storage/`: protected object-store clients and file-system integration
+- `src/training_signal_processing/core/`: protected shared runtime, submission,
+  storage, checkpoint, observability, dataclasses, and utility helpers
 - `src/training_signal_processing/ops/`: shared base classes and registry
-- `tests/test_runtime_generic.py`: import-boundary and fake-pipeline verification for the generic runtime
+- `tests/test_runtime_generic.py`: import-boundary and fake-pipeline verification for the generic core runtime
 
 ## Extension Rules
 
-- Add or change OCR processing behavior in `custom_ops/` plus the OCR recipe.
+- Add or change OCR processing behavior in `pipelines/ocr/ops.py` plus the OCR recipe.
 - Add a brand-new pipeline family in `pipelines/<name>/`.
-- Do not edit `runtime/submission.py` to add a new dataset or pipeline family.
+- Do not edit `core/submission.py` to add a new dataset or pipeline family.
 - Do not edit the protected executor loop to add normal OCR transforms.
 - Keep pipeline-owned row schemas, exporters, ledgers, and remote jobs inside `pipelines/<name>/`.
 
 The executor loop and shared submission core are intentionally fixed. Extend the
-workspace by editing recipes, custom OCR ops, or a pipeline family package.
+workspace by editing recipes, pipeline-owned ops, or a pipeline family package.
 
 ## Progress Checks
 
-For any long-running local or remote task, check MLflow first before assuming a run is stuck.
-This repo now emits progress there as the generic verification surface.
+For any long-running remote task, check durable R2 state before assuming a run is
+stuck. The detached launcher returns once the process is started; completion is
+recorded in `run_state.json`, batch manifests, event objects, and the remote log
+under `/root/ocr-jobs/<run_id>/job.log`.
+
+MLflow is optional and direct-only. Use it only when `mlflow.enabled=true` and
+`mlflow.tracking_uri` is reachable from the process doing the logging. The
+framework does not create SSH reverse tunnels.
 
 Always look up the experiment name from the active recipe:
 - shared OCR CLI recipes use `mlflow.experiment_name` from the YAML you passed to `python -m training_signal_processing.main ...`
@@ -255,7 +260,8 @@ What to look for in MLflow:
 - `last_execution_event_code` advancing as the executor moves through phases
 - metrics such as `execution_event_count` increasing over time
 
-If MLflow is not updating, then inspect the remote stderr/progress bar and the run artifacts in R2 next.
+If MLflow is disabled or not updating, inspect R2 `run_state.json`, the latest
+batch manifest/event objects, and the remote job log.
 
 ## Experiment Workflow
 
@@ -267,7 +273,7 @@ Allowed experiment surface:
 - tune existing config-backed controls such as `ray.batch_size`, `ray.target_num_blocks`, `input.max_files`, `mlflow.experiment_name`, and op options already exposed in YAML such as `force_ocr`
 
 Do not change logic just to run an experiment:
-- do not edit executor logic, submission logic, pipeline logic, or custom op logic for a tuning run
+- do not edit executor logic, submission logic, pipeline logic, or pipeline op logic for a tuning run
 - do not add one-off branches or temporary hard-coded behavior in tracked product code
 
 Put temporary experiment helpers in a local-only directory:
@@ -284,7 +290,8 @@ Examples of hard-coded categories worth escalating:
 - any experiment-critical behavior that can only be changed by editing logic
 
 Concrete repo example:
-- OCR timeout currently falls back to `OCR_CONVERSION_TIMEOUT_SEC = 1800` in [src/training_signal_processing/custom_ops/user_ops.py](/home/geeyang/workspace/training-signal-processing/src/training_signal_processing/custom_ops/user_ops.py)
+- OCR timeout currently falls back to `OCR_CONVERSION_TIMEOUT_SEC = 1800` in
+  [src/training_signal_processing/pipelines/ocr/ops.py](/home/geeyang/workspace/training-signal-processing/src/training_signal_processing/pipelines/ocr/ops.py)
 
 ## Verification
 

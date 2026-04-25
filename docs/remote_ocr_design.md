@@ -29,7 +29,7 @@ uv run --group remote_ocr python -m training_signal_processing.main run --config
    - discover local PDFs
    - upload them to `s3://gpu-poor/dataset/raw/pdf/...`
    - write an input manifest and resolved recipe object to the run prefix
-4. Sync only `pyproject.toml`, `uv.lock`, and `src/` to the remote root.
+4. Sync only `pyproject.toml`, `uv.lock`, `src/`, and `config/` to the remote root.
 5. Bootstrap `uv`, Python 3.12, and the `remote_ocr` dependency group remotely.
 6. Wait for the local PDF upload (rclone) to finish so the remote never races its inputs.
 7. Launch the remote job **detached** in its own process group via `launch_detached`:
@@ -41,16 +41,17 @@ uv run --group remote_ocr python -m training_signal_processing.main run --config
 ## Remote Execution Flow
 
 1. Read the resolved recipe and input manifest from R2.
-2. Build an explicit `pyarrow.fs.S3FileSystem`.
-3. Use `ray.data.read_binary_files(...)` for the selected input objects.
-4. Prepare source rows.
-5. Apply:
+2. Build a Ray Dataset from manifest rows.
+3. Prepare source rows.
+4. Apply:
    - `skip_existing`
    - `marker_ocr`
    - `export_markdown`
+5. Materialize each Ray batch on the driver and write markdown outputs
+   synchronously to R2 before ledger commit.
 6. Commit each finished microbatch:
    - manifest JSONL chunk
-   - event JSONL chunk
+   - event JSON chunk
    - updated `run_state.json`
 
 ## Observability

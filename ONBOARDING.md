@@ -54,21 +54,20 @@ Set these up once; you won't touch them again.
   ```
   ls ~/.ssh/id_ed25519 ~/.ssh/id_ed25519.pub
   ```
-- **(optional) rclone** — only OCR uses it, for the async local→R2
-  PDF upload. If you skip it, OCR `run` without `--dry-run` will
-  error at the rclone discovery step. Install from
-  [rclone.org/install](https://rclone.org/install/).
-- **(optional) Local MLflow server** — for a browser-accessible
-  progress view:
+- **(optional) rclone** — only OCR uses it, for the local PDF upload
+  to R2 before the detached remote job starts. If you skip it, OCR
+  `run` without `--dry-run` will error at the rclone discovery step.
+  Install from [rclone.org/install](https://rclone.org/install/).
+- **(optional) MLflow server** — only when the logging process can
+  reach `mlflow.tracking_uri` directly:
   ```
   uv run mlflow server --host 127.0.0.1 --port 5000
   ```
-  This writes an `mlflow.db` in the CWD. If you skip it, runs still
-  succeed, but progress no longer streams to your local terminal
-  (PR #1 made the launcher fire-and-forget); instead it is written to
-  `/root/ocr-jobs/<run_id>/job.log` on the pod. `tail -F` that file
-  over SSH to watch live. See §3 *Running-job runbook* for the
-  one-liners.
+  This writes an `mlflow.db` in the CWD. A remote pod cannot reach
+  your laptop's `127.0.0.1`, and the framework no longer creates SSH
+  reverse tunnels. The default OCR path uses R2 `run_state.json`,
+  batch manifests, event objects, and `/root/ocr-jobs/<run_id>/job.log`
+  for progress. See §3 *Running-job runbook* for the one-liners.
 
 ### Credentials
 
@@ -271,23 +270,17 @@ override `ssh.host` / `ssh.port` in the recipe.
       writes per-batch manifests + final markdown bytes to R2.
       Because it is detached, closing the terminal or losing the
       SSH link does not affect it.
-4. **Watch progress.** If you started local MLflow in §0, open
-   `http://127.0.0.1:5000`. Watch tags `status` (transitions
-   `running` → `success` / `partial` / `failed`) and
-   `last_execution_event_code` (event category, updates rapidly
-   as the executor phases through). Watch metrics
-   `success_count`, `failed_count`, `skipped_count`,
-   `pending_items`. See [README.md §Progress
-   Checks](README.md) for the `MlflowClient` snippet that tails the
-   latest runs from the CLI.
+4. **Watch progress.** The local CLI is fire-and-forget: it prints a
+   `LaunchHandle` and exits after the detached process starts. Progress
+   is durable in R2 and verbose in the remote log. Watch the log with
+   `ssh <pod> 'tail -F /root/ocr-jobs/<run_id>/job.log'` and inspect
+   `dataset/processed/pdf_ocr/<run_id>/run_state.json` for
+   `status`, `success_count`, `failed_count`, `skipped_count`, and
+   `pending_items`.
 
-   **If you skipped MLflow**, progress markers no longer appear on
-   your local terminal — the launcher is fire-and-forget since
-   PR #1. They are written to `/root/ocr-jobs/<run_id>/job.log` on
-   the pod instead. Watch them with
-   `ssh <pod> 'tail -F /root/ocr-jobs/<run_id>/job.log'` — look for
-   `[run]`, `[phase:…]`, `[batch:start]`, `[op:finish]`,
-   `[batch:commit]`, `[run:finish]` just as before.
+   MLflow is optional. Enable it only when `mlflow.tracking_uri` is
+   directly reachable from the process doing the logging; the framework
+   does not forward local MLflow through SSH.
 5. **Resume an interrupted run.** If the executor died mid-batch,
    pass the `run_id` (a UTC timestamp like `20260423T132754Z`) that
    was printed in the original run's JSON output:
@@ -299,6 +292,10 @@ override `ssh.host` / `ssh.port` in the recipe.
    The `OcrCheckpointStore.load_completed_item_keys` reads all prior
    batch manifests and feeds them to `SkipExistingDocumentsOp`, so
    already-successful PDFs are filtered out without being reprocessed.
+   On older runs with thousands of tiny batch manifests, the first
+   resume can spend several minutes replaying manifests before Ray
+   starts. That is expected; once recovery finishes, the remote log
+   shows Ray startup and new `[batch:commit]` lines.
 
    > ⚠ **Double-launch hazard.** `resume --run-id X` does **not**
    > currently detect a still-live run on the pod; it will blindly
@@ -432,6 +429,18 @@ Only errors the code actually raises, with the fix for each.
   swapped to a different recipe.
   *Fix:* confirm `r2.bucket` + `r2.output_prefix` match exactly.
 
+- **Resume errors with `ray.async_upload was removed` or
+  `Reverse-tunnel MLflow was removed`**
+  The run was created by an older code version, so its R2
+  `control/recipe.json` still contains removed config keys. Current
+  code intentionally rejects those keys so stale behavior does not
+  silently continue.
+  *Fix:* back up the original R2 recipe object, remove
+  `ray.async_upload`, remove `mlflow.local_tracking_uri` and
+  `mlflow.remote_tunnel_port`, and keep `mlflow.enabled=false` unless
+  you have a directly reachable `mlflow.tracking_uri`. Then rerun
+  `resume --run-id <run_id>`.
+
 - **Remote bootstrap fails during `uv sync --group remote_ocr --group model --frozen`**
   The remote image's Python doesn't match `pyproject.toml`'s pin,
   or `uv` can't build a wheel for the image's platform.
@@ -469,8 +478,8 @@ ssh <pod> 'f=/root/ocr-jobs/<run_id>/job.pgid; test -f $f && kill -0 -$(cat $f) 
 
 **Stop cleanly** — SIGTERM the whole process group; SIGKILL on
 timeout. Because `setsid` made the session leader's pid equal to the
-pgid, the negative-target kill signals Ray driver + workers + async
-uploader together:
+pgid, the negative-target kill signals the Ray driver and workers
+together:
 ```
 ssh <pod> 'p=$(cat /root/ocr-jobs/<run_id>/job.pgid); kill -TERM -$p; sleep 10; kill -KILL -$p 2>/dev/null || true'
 ```

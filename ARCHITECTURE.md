@@ -771,7 +771,7 @@ youtube_asr reuse `remote_ocr`'s deps. `[tool.uv.sources]` pins
 
 - **R2** — Cloudflare R2, S3-compatible object storage.
 - **rclone** — CLI for parallel uploads to R2/S3; OCR uses it for
-  bulk PDF transfer in parallel with remote execution.
+  bulk PDF transfer before detached remote execution starts.
 - **rsync** — CLI for code/lockfile sync; `SshRemoteTransport.sync`
   invokes it under SSH.
 - **Marker** — `marker-pdf`; the OCR engine OCR'd by `marker_ocr`.
