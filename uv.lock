@@ -3011,6 +3011,7 @@ source-cleaning = [
     { name = "pyarrow" },
     { name = "pyyaml" },
     { name = "ray", extra = ["data"] },
+    { name = "tiktoken" },
     { name = "tqdm" },
 ]
 text-cleaning = [
@@ -3079,6 +3080,7 @@ source-cleaning = [
     { name = "pyarrow", specifier = ">=20.0.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "ray", extras = ["data"], specifier = ">=2.49.0" },
+    { name = "tiktoken", specifier = ">=0.12.0" },
     { name = "tqdm", specifier = ">=4.67.1" },
 ]
 text-cleaning = [

@@ -4,12 +4,18 @@
 .omx
 .pytest_cache
 .ruff_cache
+.import_linter_cache
 .venv
+.venv-*
+.venv-ocr
+.venv-marker
 __pycache__
 *.pyc
 *.pyo
 *.pyd
 *.so
+*.py[cod]
+*.egg-info
 
 .dstack*.yml
 .lid-*.yml
