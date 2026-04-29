@@ -83,6 +83,7 @@ sources:
     parquet_batch_size: 1
     reference_removal:
       enabled: true
+      books_ocr_cleanup_enabled: true
       url_column: ""
       heading_names:
         - REFERENCES

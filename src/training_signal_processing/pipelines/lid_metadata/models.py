@@ -42,6 +42,7 @@ class ReferenceRemovalConfig:
     enabled: bool = False
     url_column: str = ""
     heading_names: tuple[str, ...] = DEFAULT_REFERENCE_HEADINGS
+    books_ocr_cleanup_enabled: bool = False
 
     def __post_init__(self) -> None:
         self.url_column = self.url_column.strip()
@@ -59,6 +60,7 @@ class ReferenceRemovalConfig:
             enabled=bool(values.get("enabled", False)),
             url_column=str(values.get("url_column", "")),
             heading_names=tuple(str(heading) for heading in headings),
+            books_ocr_cleanup_enabled=bool(values.get("books_ocr_cleanup_enabled", False)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -66,6 +68,7 @@ class ReferenceRemovalConfig:
             "enabled": self.enabled,
             "url_column": self.url_column,
             "heading_names": list(self.heading_names),
+            "books_ocr_cleanup_enabled": self.books_ocr_cleanup_enabled,
         }
 
 

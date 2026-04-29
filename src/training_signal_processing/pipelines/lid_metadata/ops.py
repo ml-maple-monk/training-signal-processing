@@ -13,6 +13,7 @@ import pyarrow.parquet as pq
 
 from ...core.storage import ObjectStore, resolve_runtime_object_store
 from ...ops.builtin import RowWiseMapperOp, SourcePreparationOp
+from .books_ocr_cleanup import clean_books_ocr_markdown
 from .models import (
     DEFAULT_PASS_THROUGH_COLUMNS,
     LidConfig,
@@ -589,17 +590,27 @@ def remove_references(
 ) -> tuple[str, dict[str, Any]]:
     if not config.enabled:
         return text, reference_metadata(False, "disabled", 0)
-    method_prefix = ""
+    cleaned_text = text
+    methods: list[str] = []
     if config.url_column and row.get(config.url_column):
         if refextract_url_has_references(str(row[config.url_column])):
-            method_prefix = "refextract_url+"
-    trimmed = trim_reference_section(text=text, heading_names=config.heading_names)
-    if trimmed == text:
-        return text, reference_metadata(False, method_prefix + "none", 0)
-    return trimmed, reference_metadata(
+            methods.append("refextract_url")
+    if config.books_ocr_cleanup_enabled:
+        cleanup_result = clean_books_ocr_markdown(cleaned_text)
+        if cleanup_result.cleaned_text != cleaned_text:
+            cleaned_text = cleanup_result.cleaned_text
+            methods.append("books_ocr_cleanup")
+    trimmed = trim_reference_section(text=cleaned_text, heading_names=config.heading_names)
+    if trimmed != cleaned_text:
+        cleaned_text = trimmed
+        methods.append("heading_trim")
+    if cleaned_text == text:
+        method = "+".join(methods + ["none"]) if methods else "none"
+        return text, reference_metadata(False, method, 0)
+    return cleaned_text, reference_metadata(
         True,
-        method_prefix + "heading_trim",
-        len(text) - len(trimmed),
+        "+".join(methods) if methods else "unknown",
+        len(text) - len(cleaned_text),
     )
 
 

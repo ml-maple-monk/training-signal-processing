@@ -14,11 +14,16 @@ from training_signal_processing.core.models import RayConfig
 from training_signal_processing.core.storage import ObjectStore
 from training_signal_processing.core.submission import ArtifactStore
 from training_signal_processing.main import cli
+from training_signal_processing.pipelines.lid_metadata.books_ocr_cleanup import (
+    CleanBooksOcrMarkdownOp,
+    clean_books_ocr_markdown,
+)
 from training_signal_processing.pipelines.lid_metadata.config import load_recipe_config
 from training_signal_processing.pipelines.lid_metadata.models import (
     LidConfig,
     LidMetadataShardResult,
     ParquetRowGroupTask,
+    ReferenceRemovalConfig,
     sample_uid,
     sample_uid_hash,
 )
@@ -30,6 +35,7 @@ from training_signal_processing.pipelines.lid_metadata.ops import (
     detect_lid_metadata_for_row_group,
     detect_lid_metadata_shard,
     maybe_run_process_pool_safety_check,
+    remove_references,
     row_group_source_key,
     trim_reference_section,
 )
@@ -138,6 +144,7 @@ def test_lid_metadata_sample_config_loads_recipe() -> None:
         "HPLT Indonesia",
     ]
     assert config.sources[0].reference_removal.enabled is True
+    assert config.sources[0].reference_removal.books_ocr_cleanup_enabled is True
     assert config.sources[1].reference_removal.enabled is False
     assert config.lid.tokenizer_encoding == "o200k_base"
     assert config.lid.row_batch_size == 64
@@ -232,6 +239,111 @@ def test_trim_reference_section_preserves_article_body() -> None:
     assert trim_reference_section(text=text, heading_names=("REFERENCES",)) == (
         "# Title\n\nMain article body."
     )
+
+
+def test_books_ocr_cleanup_removes_image_links_and_preserves_prose() -> None:
+    text = (
+        "This paragraph should stay. ![](_page_1_Figure_2.jpeg)\n"
+        "Gambar 1. Detached figure caption\n"
+        "More useful prose remains after the caption.\n"
+    )
+
+    result = clean_books_ocr_markdown(text)
+
+    assert "_page_1_Figure_2.jpeg" not in result.cleaned_text
+    assert "Gambar 1." not in result.cleaned_text
+    assert "This paragraph should stay." in result.cleaned_text
+    assert "More useful prose remains after the caption." in result.cleaned_text
+
+
+def test_books_ocr_cleanup_trims_reference_tail_only_when_reference_like() -> None:
+    text = (
+        "Main body sentence.\n\n"
+        "### DAFTAR PUSTAKA\n"
+        "- Smith, J. 2020. Example. https://doi.org/10.1000/example\n"
+        "- Ahmad, A. 2021. Another reference.\n"
+    )
+
+    result = clean_books_ocr_markdown(text)
+
+    assert result.cleaned_text == "Main body sentence."
+    assert result.removed_counts["reference_tail"] > 0
+
+
+def test_books_ocr_cleanup_removes_urls_without_deleting_surrounding_text() -> None:
+    text = "Read the guide at https://example.org/doc for more context about the method."
+
+    result = clean_books_ocr_markdown(text)
+
+    assert "https://example.org/doc" not in result.cleaned_text
+    assert "Read the guide at" in result.cleaned_text
+    assert "for more context about the method" in result.cleaned_text
+
+
+def test_books_ocr_cleanup_removes_publication_metadata_line() -> None:
+    text = "Useful abstract text.\nPublished: 28 May 2023\nAnother useful sentence."
+
+    result = clean_books_ocr_markdown(text)
+
+    assert "Published: 28 May 2023" not in result.cleaned_text
+    assert "Useful abstract text." in result.cleaned_text
+    assert "Another useful sentence." in result.cleaned_text
+
+
+def test_books_ocr_cleanup_removes_inline_reference_heading_without_tail_trim() -> None:
+    text = (
+        "Essay body should stay.\n"
+        "Closing sentence. #### Daftar Pustaka - Smith, J. 2020. Example.\n"
+        "Next essay body should also stay.\n"
+    )
+
+    result = clean_books_ocr_markdown(text)
+
+    assert "Daftar Pustaka" not in result.cleaned_text
+    assert "Essay body should stay." in result.cleaned_text
+    assert "Next essay body should also stay." in result.cleaned_text
+
+
+def test_remove_references_can_apply_books_ocr_cleanup() -> None:
+    text = (
+        "Useful text. ![](_page_1_Picture_0.jpeg)\n"
+        "Published: 28 May 2023\n"
+        "Useful ending."
+    )
+    config = ReferenceRemovalConfig(
+        enabled=True,
+        heading_names=("REFERENCES",),
+        books_ocr_cleanup_enabled=True,
+    )
+
+    cleaned, metadata = remove_references(text=text, row={}, config=config)
+
+    assert "_page_1_Picture_0.jpeg" not in cleaned
+    assert "Published: 28 May 2023" not in cleaned
+    assert "Useful text." in cleaned
+    assert "Useful ending." in cleaned
+    assert metadata["reference_removed"] is True
+    assert metadata["reference_removal_method"] == "books_ocr_cleanup"
+
+
+def test_clean_books_ocr_markdown_op_emits_cleaned_text_and_metadata() -> None:
+    op = CleanBooksOcrMarkdownOp(
+        text_column="body",
+        output_text_column="body_cleaned",
+    )
+
+    row = op.process_row(
+        {
+            "id": "row-1",
+            "body": "Useful text. ![](_page_1_Picture_0.jpeg)\nPublished: 28 May 2023",
+        }
+    )
+
+    assert row["id"] == "row-1"
+    assert row["body_cleaned"] == "Useful text."
+    assert row["books_ocr_cleanup_removed_char_count"] > 0
+    assert row["books_ocr_cleanup_removed_counts"]["markdown_image_link"] > 0
+    assert row["books_ocr_cleanup_removed_counts"]["publication_contact_metadata"] > 0
 
 
 def test_row_group_manifest_expands_parquet_row_groups(tmp_path: Path) -> None:
