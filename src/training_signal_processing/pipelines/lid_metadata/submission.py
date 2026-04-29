@@ -113,13 +113,14 @@ def build_row_group_manifest_rows(
     object_store: ObjectStore,
     run_id: str,
 ) -> list[ParquetRowGroupTask]:
-    tasks: list[ParquetRowGroupTask] = []
+    task_groups: list[list[ParquetRowGroupTask]] = []
     for source_order, source in enumerate(config.sources):
         source_keys = list_matching_keys(object_store, source.r2_relative_glob_path)
         if not source_keys:
             raise ValueError(f"No R2 objects matched: {source.r2_relative_glob_path}")
+        source_tasks: list[ParquetRowGroupTask] = []
         for source_key in source_keys:
-            tasks.extend(
+            source_tasks.extend(
                 build_source_row_group_tasks(
                     config=config,
                     object_store=object_store,
@@ -129,7 +130,24 @@ def build_row_group_manifest_rows(
                     run_id=run_id,
                 )
             )
-    return tasks
+        task_groups.append(source_tasks)
+    return interleave_row_group_tasks(task_groups)
+
+
+def interleave_row_group_tasks(
+    task_groups: list[list[ParquetRowGroupTask]],
+) -> list[ParquetRowGroupTask]:
+    """Round-robin sources so early Ray blocks are not dominated by one source."""
+    interleaved: list[ParquetRowGroupTask] = []
+    pending_groups = [list(group) for group in task_groups if group]
+    while pending_groups:
+        next_groups: list[list[ParquetRowGroupTask]] = []
+        for group in pending_groups:
+            interleaved.append(group.pop(0))
+            if group:
+                next_groups.append(group)
+        pending_groups = next_groups
+    return interleaved
 
 
 def build_source_row_group_tasks(

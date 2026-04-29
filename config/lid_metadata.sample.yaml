@@ -43,6 +43,7 @@ lid:
   malaya_fasttext_quantized: true
   tokenizer_encoding: o200k_base
   row_batch_size: 64
+  ray_num_cpus_per_worker: 1
   inner_parallelism: none
   inner_workers: 1
   checkpoint_every_rows: 1000

@@ -10,6 +10,7 @@ import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
 
+from training_signal_processing.core.models import RayConfig
 from training_signal_processing.core.storage import ObjectStore
 from training_signal_processing.core.submission import ArtifactStore
 from training_signal_processing.main import cli
@@ -17,6 +18,7 @@ from training_signal_processing.pipelines.lid_metadata.config import load_recipe
 from training_signal_processing.pipelines.lid_metadata.models import (
     LidConfig,
     LidMetadataShardResult,
+    ParquetRowGroupTask,
     sample_uid,
     sample_uid_hash,
 )
@@ -31,7 +33,10 @@ from training_signal_processing.pipelines.lid_metadata.ops import (
     row_group_source_key,
     trim_reference_section,
 )
-from training_signal_processing.pipelines.lid_metadata.runtime import LidMetadataParquetExporter
+from training_signal_processing.pipelines.lid_metadata.runtime import (
+    LidMetadataParquetExporter,
+    resolve_lid_metadata_transform_resources,
+)
 from training_signal_processing.pipelines.lid_metadata.submission import (
     LidMetadataSubmissionAdapter,
     build_row_group_manifest_rows,
@@ -136,6 +141,7 @@ def test_lid_metadata_sample_config_loads_recipe() -> None:
     assert config.sources[1].reference_removal.enabled is False
     assert config.lid.tokenizer_encoding == "o200k_base"
     assert config.lid.row_batch_size == 64
+    assert config.lid.ray_num_cpus_per_worker == pytest.approx(1.0)
     assert config.lid.inner_parallelism == "none"
     assert config.lid.variant_name == "row-batch-64"
 
@@ -145,6 +151,53 @@ def test_lid_metadata_config_rejects_missing_text_column(tmp_path: Path) -> None
 
     with pytest.raises(ValueError, match="text_column is required"):
         load_recipe_config(config_path)
+
+
+def test_lid_metadata_transform_resources_use_configured_cpu_per_worker() -> None:
+    config = load_recipe_config(Path("config/lid_metadata.sample.yaml"))
+    config.lid.ray_num_cpus_per_worker = 2.0
+    execution = RayConfig(
+        executor_type="ray",
+        batch_size=1,
+        concurrency=64,
+        target_num_blocks=8192,
+    )
+
+    resources = resolve_lid_metadata_transform_resources(
+        config,
+        SimpleNamespace(name="detect_lid_metadata_row_group"),
+        execution,
+    )
+
+    assert resources.concurrency == 64
+    assert resources.num_cpus == pytest.approx(2.0)
+
+
+def test_parquet_row_group_task_drops_null_filter_values_from_arrow_structs() -> None:
+    table = pa.Table.from_pylist(
+        [
+            {"filters": {}},
+            {"filters": {"subreddit": "Bolehland"}},
+        ]
+    )
+    inferred_empty_filters = table.to_pylist()[0]["filters"]
+    row = {
+        "source_order": 0,
+        "source_name": "Books + OCR",
+        "source_bucket": "gpu-poor",
+        "source_object_key": "dataset/processed/pdf_ocr/markdown.parquet",
+        "source_parquet_url": "r2://gpu-poor/dataset/processed/pdf_ocr/markdown.parquet",
+        "source_row_group_index": 0,
+        "source_row_group_start_index": 0,
+        "source_row_group_num_rows": 1,
+        "text_column": "markdown_text",
+        "filters": inferred_empty_filters,
+        "pass_through_columns": [],
+        "output_shard_key": "dataset/processed/lid-metadata/run/shards/books/rg00000.parquet",
+    }
+
+    assert inferred_empty_filters == {"subreddit": None}
+    assert ParquetRowGroupTask.from_dict(row).filters == {}
 
 
 def test_lid_metadata_config_rejects_unsafe_experiment_values(tmp_path: Path) -> None:
@@ -203,6 +256,52 @@ def test_row_group_manifest_expands_parquet_row_groups(tmp_path: Path) -> None:
         (1, 2),
     ]
     assert rows[0].output_shard_key.endswith("example.rg00000.parquet")
+
+
+def test_row_group_manifest_interleaves_sources_for_early_parallelism(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path)
+    parquet_root = tmp_path / "gpu-poor/dataset/processed"
+    parquet_root.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"body": ["a1", "a2", "a3"]}),
+        parquet_root / "a.parquet",
+        row_group_size=1,
+    )
+    pq.write_table(pa.table({"body": ["b1", "b2"]}), parquet_root / "b.parquet", row_group_size=1)
+    config_path = write_lid_config(tmp_path)
+    text = config_path.read_text(encoding="utf-8")
+    text = text.replace(
+        "sources:\n"
+        "  - name: Reddit Bolehland\n"
+        "    format: parquet\n"
+        "    r2_relative_glob_path: dataset/processed/example.parquet\n"
+        "    text_column: 'body'\n"
+        "    filters:\n"
+        "      subreddit: Bolehland\n"
+        "    reference_removal:\n"
+        "      enabled: false\n",
+        "sources:\n"
+        "  - name: Source A\n"
+        "    format: parquet\n"
+        "    r2_relative_glob_path: dataset/processed/a.parquet\n"
+        "    text_column: body\n"
+        "  - name: Source B\n"
+        "    format: parquet\n"
+        "    r2_relative_glob_path: dataset/processed/b.parquet\n"
+        "    text_column: body\n",
+    )
+    config_path.write_text(text, encoding="utf-8")
+    config = load_recipe_config(config_path)
+
+    rows = build_row_group_manifest_rows(config=config, object_store=store, run_id="run-001")
+
+    assert [row.source_name for row in rows] == [
+        "Source A",
+        "Source B",
+        "Source A",
+        "Source B",
+        "Source A",
+    ]
 
 
 def test_lid_detection_row_group_outputs_traceable_metadata(
@@ -466,6 +565,7 @@ def test_lid_metadata_dstack_configs_do_not_sync_secret_files() -> None:
     config_paths = [
         Path("infra/dstack/config/lid-metadata-canary-cpu2.dstack.yml"),
         Path("infra/dstack/config/lid-metadata-cpu32.dstack.yml"),
+        Path("infra/dstack/config/lid-metadata-cpu64.dstack.yml"),
     ]
     for config_path in config_paths:
         text = config_path.read_text(encoding="utf-8")
@@ -482,6 +582,11 @@ def test_lid_metadata_dstack_configs_do_not_sync_secret_files() -> None:
     production_text = config_paths[1].read_text(encoding="utf-8")
     assert "nodes:" not in production_text
     assert "cpu: 32.." in production_text
+
+    cpu64_text = config_paths[2].read_text(encoding="utf-8")
+    assert "nodes:" not in cpu64_text
+    assert "CPU.64V.256G" in cpu64_text
+    assert "cpu: 64.." in cpu64_text
     assert "memory: 128GB.." in production_text
     assert "LID_METADATA_RUN_ID" in production_text
 

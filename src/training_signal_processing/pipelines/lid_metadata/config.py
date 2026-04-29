@@ -68,6 +68,9 @@ class LidMetadataRecipeConfigLoader(config_loading.AbstractRecipeConfigLoader):
                 ),
                 tokenizer_encoding=str(lid_raw.get("tokenizer_encoding", "o200k_base")),
                 row_batch_size=int(lid_raw.get("row_batch_size", 0)),
+                ray_num_cpus_per_worker=float(
+                    lid_raw.get("ray_num_cpus_per_worker", 1.0)
+                ),
                 inner_parallelism=str(lid_raw.get("inner_parallelism", "none")),
                 inner_workers=int(lid_raw.get("inner_workers", 1)),
                 checkpoint_every_rows=int(lid_raw.get("checkpoint_every_rows", 1000)),

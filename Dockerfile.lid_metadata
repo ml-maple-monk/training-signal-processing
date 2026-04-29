@@ -13,7 +13,10 @@ COPY src ./src
 COPY config ./config
 COPY infra/dstack/scripts ./infra/dstack/scripts
 
-RUN uv sync --group lid_metadata --no-dev --frozen
+RUN uv sync --group lid_metadata --no-dev --frozen && \
+    uv pip install --python .venv/bin/python \
+    --index-url https://download.pytorch.org/whl/cpu \
+    "torch==2.8.0+cpu"
 
 ENTRYPOINT ["uv", "run", "--no-sync", "--group", "lid_metadata", "python", "-m", "training_signal_processing.main"]
 CMD ["lid-metadata-validate", "--help"]

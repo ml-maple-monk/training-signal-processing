@@ -51,7 +51,7 @@ wait_for_ray_nodes() {
     local address="$1"
     local expected="$2"
     local timeout="$3"
-    python - "$address" "$expected" "$timeout" <<'PY'
+    uv run --no-sync --group lid_metadata python - "$address" "$expected" "$timeout" <<'PY'
 import sys
 import time
 
@@ -108,8 +108,8 @@ PY
 
 start_ray_head() {
     echo "[lid-dstack] Starting Ray head at ${DSTACK_MASTER_NODE_IP}:${RAY_HEAD_PORT}"
-    ray stop --force >/dev/null 2>&1 || true
-    ray start \
+    uv run --no-sync --group lid_metadata ray stop --force >/dev/null 2>&1 || true
+    uv run --no-sync --group lid_metadata ray start \
         --head \
         --node-ip-address="$DSTACK_MASTER_NODE_IP" \
         --port="$RAY_HEAD_PORT" \
@@ -121,9 +121,9 @@ start_ray_head() {
 start_ray_worker() {
     echo "[lid-dstack] Waiting for Ray head ${DSTACK_MASTER_NODE_IP}:${RAY_HEAD_PORT}"
     wait_for_port "$DSTACK_MASTER_NODE_IP" "$RAY_HEAD_PORT" "$RAY_CLUSTER_WAIT_SECONDS"
-    ray stop --force >/dev/null 2>&1 || true
+    uv run --no-sync --group lid_metadata ray stop --force >/dev/null 2>&1 || true
     echo "[lid-dstack] Joining Ray head ${DSTACK_MASTER_NODE_IP}:${RAY_HEAD_PORT}"
-    ray start \
+    uv run --no-sync --group lid_metadata ray start \
         --address="${DSTACK_MASTER_NODE_IP}:${RAY_HEAD_PORT}" \
         --num-cpus="$RAY_NUM_CPUS" \
         --block

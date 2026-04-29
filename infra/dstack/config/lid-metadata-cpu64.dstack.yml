@@ -1,0 +1,61 @@
+# doc-anchor: dstack-lid-metadata-cpu64-yaml
+type: task
+name: tsp-lid-cpu64
+
+image: ${LID_METADATA_IMAGE}
+registry_auth:
+  username: ${VCR_USERNAME}
+  password: ${VCR_PASSWORD}
+
+env:
+  - LID_METADATA_IMAGE
+  - VCR_USERNAME
+  - VCR_PASSWORD
+  - R2_BUCKET
+  - R2_ACCESS_KEY_ID
+  - R2_SECRET_ACCESS_KEY
+  - R2_REGION
+  - R2_ENDPOINT_URL
+  - LID_METADATA_RUN_ID
+  - LID_METADATA_CONFIG_OBJECT_KEY
+  - LID_METADATA_INPUT_MANIFEST_KEY
+  - LID_METADATA_UPLOADED_ITEMS
+  - RAY_CLUSTER_WAIT_SECONDS=900
+
+commands:
+  - |
+    set -eu
+    echo "[lid-dstack] Starting single-node CPU64 LID run ${LID_METADATA_RUN_ID}"
+    echo "[lid-dstack] Visible CPUs: $(nproc)"
+    for name in R2_BUCKET R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_REGION \
+      R2_ENDPOINT_URL LID_METADATA_RUN_ID LID_METADATA_CONFIG_OBJECT_KEY \
+      LID_METADATA_INPUT_MANIFEST_KEY LID_METADATA_UPLOADED_ITEMS; do
+      if [ -z "$(printenv "$name")" ]; then
+        echo "[lid-dstack] ERROR: required env var is missing: $name" >&2
+        exit 2
+      fi
+    done
+    echo "[lid-dstack] Required runtime environment is present"
+    export RAY_PYTHON_EXECUTABLE=/app/.venv/bin/python
+    /app/.venv/bin/python -m training_signal_processing.main \
+      lid-metadata-remote-job \
+      --run-id "$LID_METADATA_RUN_ID" \
+      --config-object-key "$LID_METADATA_CONFIG_OBJECT_KEY" \
+      --input-manifest-key "$LID_METADATA_INPUT_MANIFEST_KEY" \
+      --uploaded-items "$LID_METADATA_UPLOADED_ITEMS"
+
+backends: [verda]
+regions: [FIN-03]
+instance_types: [CPU.64V.256G]
+resources:
+  cpu: 64..
+  memory: 256GB..
+  disk: 200GB..
+spot_policy: on-demand
+max_duration: 24h
+idle_duration: 0s
+retry:
+  on_events:
+    - no-capacity
+    - interruption
+  duration: 2h

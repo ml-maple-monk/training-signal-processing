@@ -26,6 +26,8 @@ commands:
   - bash /app/infra/dstack/scripts/run-lid-metadata-ray.sh
 
 backends: [verda]
+regions: [FIN-03]
+instance_types: [CPU.32V.128G]
 resources:
   cpu: 32..
   memory: 128GB..

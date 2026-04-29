@@ -20,9 +20,18 @@ env:
   - RAY_CLUSTER_WAIT_SECONDS=600
 
 commands:
-  - bash /app/infra/dstack/scripts/run-lid-metadata-ray.sh
+  - >-
+    timeout 300 bash -lc 'uv run --no-sync --group lid_metadata python -m
+    training_signal_processing.main lid-metadata-validate --config
+    /app/config/lid_metadata.sample.yaml --set ray.concurrency=32 --set
+    ray.target_num_blocks=1024 && uv run --no-sync --group lid_metadata python
+    -c "from training_signal_processing.pipelines.lid_metadata.ops import
+    build_lingua_detector; build_lingua_detector(); print(\"canary ok\",
+    flush=True)"'
 
 backends: [verda]
+regions: [FIN-03]
+instance_types: [CPU.32V.128G]
 resources:
   cpu: 32..
   memory: 128GB..

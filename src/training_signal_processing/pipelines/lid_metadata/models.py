@@ -159,6 +159,7 @@ class LidConfig:
     malaya_fasttext_quantized: bool = True
     tokenizer_encoding: str = "o200k_base"
     row_batch_size: int = 0
+    ray_num_cpus_per_worker: float = 1.0
     inner_parallelism: str = "none"
     inner_workers: int = 1
     checkpoint_every_rows: int = 1000
@@ -185,6 +186,8 @@ class LidConfig:
             raise ValueError("lid.tokenizer_encoding must be non-empty.")
         if self.row_batch_size < 0:
             raise ValueError("lid.row_batch_size must be zero or positive.")
+        if self.ray_num_cpus_per_worker <= 0:
+            raise ValueError("lid.ray_num_cpus_per_worker must be positive.")
         if self.inner_parallelism not in LID_INNER_PARALLELISM_MODES:
             raise ValueError(
                 "lid.inner_parallelism must be one of "
@@ -265,7 +268,7 @@ class ParquetRowGroupTask:
             source_row_group_start_index=int(row["source_row_group_start_index"]),
             source_row_group_num_rows=int(row["source_row_group_num_rows"]),
             text_column=str(row["text_column"]),
-            filters=dict(row.get("filters", {})),
+            filters=normalize_filter_values(row.get("filters", {})),
             pass_through_columns=tuple(row.get("pass_through_columns", ())),
             reference_removal=ReferenceRemovalConfig.from_dict(
                 row.get("reference_removal")
@@ -280,6 +283,20 @@ class ParquetRowGroupTask:
         payload["pass_through_columns"] = list(self.pass_through_columns)
         payload["reference_removal"] = self.reference_removal.to_dict()
         return payload
+
+
+def normalize_filter_values(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    filters: dict[str, str] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).strip()
+        if not key or raw_value is None:
+            continue
+        filter_value = str(raw_value).strip()
+        if filter_value:
+            filters[key] = filter_value
+    return filters
 
 
 @dataclass

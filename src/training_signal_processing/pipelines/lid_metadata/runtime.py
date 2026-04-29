@@ -172,10 +172,12 @@ def resolve_lid_metadata_transform_resources(
     op: Op,
     execution: RayConfig,
 ) -> RayTransformResources:
-    del config
     if op.name != "detect_lid_metadata_row_group":
         return RayTransformResources()
-    return RayTransformResources(concurrency=execution.concurrency)
+    return RayTransformResources(
+        concurrency=execution.concurrency,
+        num_cpus=config.lid.ray_num_cpus_per_worker,
+    )
 
 
 def build_adapter(
