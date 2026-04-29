@@ -1,0 +1,130 @@
+run:
+  name: lid-metadata
+  config_version: 1
+
+ssh:
+  host: 127.0.0.1
+  port: 22
+  user: root
+  identity_file: ~/.ssh/id_ed25519
+
+remote:
+  root_dir: /tmp/training-signal-processing
+  python_version: "3.12"
+  remote_jobs_root: /tmp/lid-metadata-jobs
+  pgid_wait_attempts: 20
+  pgid_wait_sleep_seconds: 0.25
+  sync_paths:
+    - pyproject.toml
+    - uv.lock
+    - src
+    - config
+
+ray:
+  executor_type: ray
+  batch_size: 1
+  concurrency: 4
+  target_num_blocks: 64
+
+r2:
+  config_file: r2
+  bucket: gpu-poor
+  output_prefix: dataset/processed/lid-metadata
+
+input:
+  source_root_key: dataset
+  shard_rows_per_file: 0
+
+lid:
+  lingua_languages:
+    - english
+    - malay
+    - indonesian
+  malaya_fasttext_quantized: true
+  tokenizer_encoding: o200k_base
+  row_batch_size: 64
+  inner_parallelism: none
+  inner_workers: 1
+  checkpoint_every_rows: 1000
+  checkpoint_every_seconds: 30
+  progress_log_every_seconds: 30
+  experiment_name: lid-metadata
+  variant_name: row-batch-64
+  multiprocessing_context: spawn
+  process_pool_timeout_seconds: 30
+
+mlflow:
+  enabled: false
+  tracking_uri: ""
+  experiment_name: lid-metadata
+
+observability:
+  flush_interval_sec: 5
+  log_per_file_events: true
+  heartbeat_interval_sec: 10
+
+resumability:
+  strategy: batch_manifest
+  commit_every_batches: 1
+  resume_mode: latest
+
+ops:
+  - name: prepare_lid_metadata_row_group
+    type: mapper
+  - name: detect_lid_metadata_row_group
+    type: mapper
+
+sources:
+  - name: "Books + OCR"
+    format: parquet
+    r2_relative_glob_path: "dataset/processed/pdf_ocr/20260423T195035Z/markdown.parquet"
+    text_column: markdown_text
+    parquet_batch_size: 1
+    reference_removal:
+      enabled: true
+      url_column: ""
+      heading_names:
+        - REFERENCES
+        - Bibliography
+        - Daftar Pustaka
+        - Rujukan
+  - name: Lowyat
+    format: parquet
+    r2_relative_glob_path: "dataset/processed/malay/lowyat.parquet"
+    text_column: body_text
+    reference_removal:
+      enabled: false
+  - name: "Reddit Bolehland"
+    format: parquet
+    r2_relative_glob_path: "dataset/processed/malay/reddit.parquet"
+    text_column: body
+    filters:
+      subreddit: Bolehland
+    reference_removal:
+      enabled: false
+  - name: "Reddit Indonesia"
+    format: parquet
+    r2_relative_glob_path: "dataset/processed/malay/reddit.parquet"
+    text_column: body
+    filters:
+      subreddit: indonesia
+    reference_removal:
+      enabled: false
+  - name: Cari
+    format: parquet
+    r2_relative_glob_path: "dataset/processed/malay/cari.parquet"
+    text_column: body_text
+    reference_removal:
+      enabled: false
+  - name: "HPLT Malay"
+    format: parquet
+    r2_relative_glob_path: "dataset/processed/malay/hplt/*_malay.parquet"
+    text_column: text
+    reference_removal:
+      enabled: false
+  - name: "HPLT Indonesia"
+    format: parquet
+    r2_relative_glob_path: "dataset/processed/malay/hplt/*_indon.parquet"
+    text_column: text
+    reference_removal:
+      enabled: false

@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1
+
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
+
+COPY pyproject.toml uv.lock ./
+COPY src ./src
+COPY plans ./plans
+COPY config ./config
+
+RUN uv sync --group source_accounting --no-dev --frozen
+
+ENTRYPOINT ["uv", "run", "--no-sync", "--group", "source_accounting", "python", "-m", "training_signal_processing.main"]
+CMD ["source-accounting-validate", "--help"]

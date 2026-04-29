@@ -1,0 +1,1 @@
+rclone ls ocrresults:gpu-poor/dataset/processed/pdf_ocr/20260423T195035Z/markdown | wc -l

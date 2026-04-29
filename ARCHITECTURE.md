@@ -2,8 +2,10 @@
 
 `training_signal_processing` is a small framework for running **batch
 GPU pipelines on remote machines**, plus concrete pipeline packages on
-top of it: **OCR** (Marker on PDFs) and **example_echo** (a minimal
-reference pipeline). The shared layer is intentionally pipeline-agnostic;
+top of it: **OCR** (Marker on PDFs), **source accounting** (dataset
+inventory/token metadata), **LID metadata** (language-ID sidecars for
+processed parquet rows), and **example_echo** (a minimal reference
+pipeline). The shared layer is intentionally pipeline-agnostic;
 new pipelines plug in through small template bases and registered ops.
 This document captures the static structure (layers, contracts, frozen
 invariants) and the dynamic flow (submission → remote execution →
@@ -67,8 +69,8 @@ in-memory progress per batch.
 +--------------------------------------------------------------------+
 |  TOP — pipeline-specific                                           |
 |                                                                    |
-|  pipelines/ocr                                                      |
-|    models.py   ops.py   marker_runtime.py   runtime.py              |
+|  pipelines/ocr | source_accounting | lid_metadata                   |
+|    models.py   ops.py   runtime.py   submission.py                  |
 +----------------------------|---------------------------------------+
                              |  pipelines compose ops + adapters
                              v  (concrete Op subclasses + Recipe)
@@ -288,7 +290,7 @@ Per-run keys live under `r2.output_prefix/<run_id>/`:
 ```
 control/input_manifest.jsonl   # input rows for executor
 control/recipe.json            # exact resolved recipe used
-<pipeline outputs>             # markdown for OCR, JSON for example_echo, ...
+<pipeline outputs>             # markdown, source metadata, LID parquet shards, ...
 ```
 
 `RunArtifactLayout` (`core/models.py`) carries the two roots
@@ -611,6 +613,13 @@ write succeeds, that object is absent and the source is retried on the next
 run. `allow_overwrite=True` makes the completed set empty so every source is
 processed again.
 
+The LID metadata pipeline also writes progress-only row-group checkpoint
+sidecars under `checkpoints/<source>/<file>.rgNNNNN.json`. Those objects report
+rows/tokens completed and current tokens/sec during long row groups, but they
+do not mark completion. The authoritative resume unit remains the final parquet
+shard under `shards/<source>/<file>.rgNNNNN.parquet`; a checkpoint-only row
+group reruns from the beginning on resume.
+
 ---
 
 ## 12. OCR pipeline walkthrough end-to-end
@@ -725,6 +734,18 @@ Data, writes one JSON object per source, and exposes its remote job via
 Use it as the smallest working shape for new pipeline families; OCR is
 the richer production example.
 
+**source_accounting** (`pipelines/source_accounting/`) scans processed dataset
+parquet sources from YAML, writes accounting shards, and keeps the same
+batch-manifest resume shape as OCR.
+
+**lid_metadata** (`pipelines/lid_metadata/`) expands prior processed parquet
+sources at row-group granularity, optionally trims reference sections, runs
+Lingua plus Malaya document/word LID, and writes traceable metadata parquet
+shards. Its throughput experiment knobs live in `lid:` (`row_batch_size`,
+`inner_parallelism`, checkpoint intervals, and experiment/variant names);
+metrics are emitted as checkpoint JSON, structured progress logs, and
+per-shard `.metrics.json` sidecars.
+
 ---
 
 ## 14. Infrastructure
@@ -753,11 +774,12 @@ portable across operators.
 or from process env (`R2ObjectStore.from_environment`). The remote
 process gets the env-var bundle from `R2ArtifactStore.build_remote_env`.
 
-**Python deps.** `pyproject.toml [dependency-groups]` declares only
-three groups: `dev` (lint/test), `model` (`torch`, `transformers`),
-`remote_ocr` (`boto3`, `click`, `marker-pdf`, `mlflow-skinny`,
-`pyarrow`, `pyyaml`, `ray[data]`, `torch`, `tqdm`). `[tool.uv.sources]` pins
-`torch` to PyTorch's CUDA-128 wheel index on linux.
+**Python deps.** `pyproject.toml [dependency-groups]` declares pipeline-scoped
+groups: `dev` (lint/test), `model` (`torch`, `transformers`), `remote_ocr`
+(`marker-pdf` plus runtime deps), `source_accounting`, and `lid_metadata`
+(`lingua-language-detector`, `malaya`, `fasttext`, `refextract`, `tiktoken`,
+and shared R2/Ray deps). `[tool.uv.sources]` pins `torch` to PyTorch's CUDA-128
+wheel index on linux.
 
 ---
 

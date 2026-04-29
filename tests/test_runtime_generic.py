@@ -501,6 +501,32 @@ def test_configured_ray_dataset_builder_skips_repartition_for_single_row(monkeyp
     assert calls == []
 
 
+def test_ray_dataset_builder_uses_ray_address_from_environment(monkeypatch) -> None:
+    init_calls: list[dict[str, object]] = []
+    monkeypatch.setenv("RAY_ADDRESS", "10.0.0.1:6379")
+    monkeypatch.setattr(
+        "training_signal_processing.core.dataset.ray.is_initialized",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "training_signal_processing.core.dataset.ray.init",
+        lambda **kwargs: init_calls.append(kwargs),
+    )
+
+    builder = ConfiguredRayDatasetBuilder(
+        RayConfig(
+            executor_type="ray",
+            batch_size=1,
+            concurrency=1,
+            target_num_blocks=1,
+        )
+    )
+
+    builder.ensure_ray_initialized()
+
+    assert init_calls == [{"address": "10.0.0.1:6379", "ignore_reinit_error": True}]
+
+
 class ResourceOverridePipelineAdapter(FakePipelineAdapter):
     def __init__(self) -> None:
         super().__init__()

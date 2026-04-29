@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1
+
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
+
+COPY pyproject.toml uv.lock ./
+COPY src ./src
+COPY config ./config
+COPY infra/dstack/scripts ./infra/dstack/scripts
+
+RUN uv sync --group lid_metadata --no-dev --frozen
+
+ENTRYPOINT ["uv", "run", "--no-sync", "--group", "lid_metadata", "python", "-m", "training_signal_processing.main"]
+CMD ["lid-metadata-validate", "--help"]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from typing import Any
@@ -119,7 +120,8 @@ class RayDatasetBuilder(DatasetBuilder):
 
     def ensure_ray_initialized(self) -> None:
         if not ray.is_initialized():
-            ray.init(ignore_reinit_error=True)
+            ray_address = os.environ.get("RAY_ADDRESS", "").strip()
+            ray.init(address=ray_address or None, ignore_reinit_error=True)
 
 
 class LocalRayDatasetBuilder(RayDatasetBuilder):

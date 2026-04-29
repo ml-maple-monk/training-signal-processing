@@ -1,0 +1,17 @@
+Data sources 
+Books + OCR with https://github.com/datalab-to/marker
+    Article = Less than 20 page
+    Book = Longer than 20 page
+Malay forums data : Cari and lowyat
+    Lowyat
+    Reddit 
+        Bolehland
+        Indonesia
+    Cari 
+HPLT data for indonesia and malay
+    Malay
+    Indonesia
+
+Write a table for token count from different source and their path on R2
+word count, byte count, document count 
+Use tiktoken 200k_case_cls

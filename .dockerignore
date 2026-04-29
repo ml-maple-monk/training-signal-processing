@@ -1,0 +1,13 @@
+.cache
+.git
+.omx
+.pytest_cache
+.ruff_cache
+.venv
+__pycache__
+*.pyc
+
+r2
+infra/credentials
+infra/current-machine
+infra/.current-machine

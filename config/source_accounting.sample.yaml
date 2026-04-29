@@ -1,0 +1,109 @@
+run:
+  name: source-accounting
+  config_version: 1
+
+ssh:
+  host: 127.0.0.1
+  port: 22
+  user: root
+  identity_file: ~/.ssh/id_ed25519
+
+remote:
+  root_dir: /tmp/training-signal-processing
+  python_version: "3.12"
+  remote_jobs_root: /tmp/source-accounting-jobs
+  pgid_wait_attempts: 20
+  pgid_wait_sleep_seconds: 0.25
+  sync_paths:
+    - pyproject.toml
+    - uv.lock
+    - src
+    - plans
+    - config
+
+ray:
+  executor_type: ray
+  batch_size: 1
+  concurrency: 7
+  target_num_blocks: 7
+
+r2:
+  config_file: r2
+  bucket: gpu-poor
+  output_prefix: dataset/processed/source_accounting
+
+input:
+  plan_path: plans/source-accounting
+  source_root_key: dataset
+
+tokenizer:
+  encoding: o200k_base
+
+mlflow:
+  enabled: false
+  tracking_uri: ""
+  experiment_name: source-accounting
+
+observability:
+  flush_interval_sec: 5
+  log_per_file_events: true
+  heartbeat_interval_sec: 10
+
+resumability:
+  strategy: batch_manifest
+  commit_every_batches: 1
+  resume_mode: latest
+
+ops:
+  - name: prepare_source_accounting_source
+    type: mapper
+  - name: count_source_accounting_source
+    type: mapper
+
+sources:
+  - name: "Books + OCR"
+    format: parquet
+    r2_relative_glob_path: "dataset/processed/pdf_ocr/20260423T195035Z/markdown.parquet"
+    text_column: markdown_text
+    parquet_batch_size: 256
+    count_concurrency: 4
+  - name: Lowyat
+    format: parquet
+    r2_relative_glob_path: "dataset/processed/malay/lowyat.parquet"
+    text_column: body_text
+    parquet_batch_size: 2048
+    count_concurrency: 4
+  - name: "Reddit Bolehland"
+    format: parquet
+    r2_relative_glob_path: "dataset/processed/malay/reddit.parquet"
+    text_column: body
+    parquet_batch_size: 2048
+    count_concurrency: 4
+    filters:
+      subreddit: Bolehland
+  - name: "Reddit Indonesia"
+    format: parquet
+    r2_relative_glob_path: "dataset/processed/malay/reddit.parquet"
+    text_column: body
+    parquet_batch_size: 2048
+    count_concurrency: 4
+    filters:
+      subreddit: indonesia
+  - name: Cari
+    format: parquet
+    r2_relative_glob_path: "dataset/processed/malay/cari.parquet"
+    text_column: body_text
+    parquet_batch_size: 2048
+    count_concurrency: 4
+  - name: "HPLT Malay"
+    format: parquet
+    r2_relative_glob_path: "dataset/processed/malay/hplt/*_malay.parquet"
+    text_column: text
+    parquet_batch_size: 2048
+    count_concurrency: 4
+  - name: "HPLT Indonesia"
+    format: parquet
+    r2_relative_glob_path: "dataset/processed/malay/hplt/*_indon.parquet"
+    text_column: text
+    parquet_batch_size: 2048
+    count_concurrency: 4
