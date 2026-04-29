@@ -12,8 +12,8 @@ from typing import Any
 import pyarrow.parquet as pq
 
 from ...core.storage import ObjectStore, resolve_runtime_object_store
+from ...ops.books_ocr_cleanup import clean_books_ocr_markdown
 from ...ops.builtin import RowWiseMapperOp, SourcePreparationOp
-from .books_ocr_cleanup import clean_books_ocr_markdown
 from .models import (
     DEFAULT_PASS_THROUGH_COLUMNS,
     LidConfig,

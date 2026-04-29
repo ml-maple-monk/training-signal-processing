@@ -5,7 +5,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
-from ...ops.builtin import RowWiseMapperOp
+from .builtin import RowWiseMapperOp
 
 IMAGE_MARKDOWN_PATTERN = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 PAGE_ASSET_PATTERN = re.compile(r"_page_\d+_[A-Za-z]+_\d+\.(?:jpeg|jpg|png)", re.IGNORECASE)

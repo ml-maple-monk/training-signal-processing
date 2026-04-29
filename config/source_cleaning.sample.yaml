@@ -1,0 +1,108 @@
+run:
+  name: source-cleaning
+  config_version: 1
+
+ssh:
+  host: 127.0.0.1
+  port: 22
+  user: root
+  identity_file: ~/.ssh/id_ed25519
+
+remote:
+  root_dir: /tmp/training-signal-processing
+  python_version: "3.12"
+  remote_jobs_root: /tmp/source-cleaning-jobs
+  pgid_wait_attempts: 20
+  pgid_wait_sleep_seconds: 0.25
+  sync_paths:
+    - pyproject.toml
+    - uv.lock
+    - src
+    - config
+
+ray:
+  # Best measured local R2 canary on 2026-04-29:
+  # 64x1, POLARS_MAX_THREADS=1 processed 6.27B chars at 13.45 MB/s.
+  executor_type: ray
+  batch_size: 1
+  concurrency: 64
+  target_num_blocks: 8192
+
+r2:
+  config_file: r2
+  bucket: gpu-poor
+  output_prefix: dataset/processed/source-cleaning
+
+input:
+  source_root_key: dataset
+
+cleaning:
+  ray_num_cpus_per_worker: 1
+  polars_max_threads: 1
+  # Alternate canary only: ray_num_cpus_per_worker=2,
+  # polars_max_threads=2, and ray.concurrency=32 measured slower at 12.99 MB/s.
+
+mlflow:
+  enabled: false
+  tracking_uri: ""
+  experiment_name: source-cleaning
+
+observability:
+  flush_interval_sec: 5
+  log_per_file_events: true
+  heartbeat_interval_sec: 10
+
+resumability:
+  strategy: batch_manifest
+  commit_every_batches: 1
+  resume_mode: latest
+
+ops:
+  - name: prepare_source_cleaning_row_group
+    type: mapper
+  - name: clean_source_row_group
+    type: mapper
+
+sources:
+  - name: "Books + OCR"
+    format: parquet
+    r2_relative_glob_path: "dataset/processed/pdf_ocr/20260423T195035Z/markdown.parquet"
+    text_column: markdown_text
+    cleaning_source: books-ocr
+  - name: Lowyat
+    format: parquet
+    r2_relative_glob_path: "dataset/processed/malay/lowyat.parquet"
+    text_column: body_text
+    cleaning_source: lowyat
+    scheduling_weight: 2
+  - name: "Reddit Bolehland"
+    format: parquet
+    r2_relative_glob_path: "dataset/processed/malay/reddit.parquet"
+    text_column: body
+    cleaning_source: reddit-bolehland
+    filters:
+      subreddit: Bolehland
+  - name: "Reddit Indonesia"
+    format: parquet
+    r2_relative_glob_path: "dataset/processed/malay/reddit.parquet"
+    text_column: body
+    cleaning_source: reddit-indonesia
+    filters:
+      subreddit: indonesia
+  - name: Cari
+    format: parquet
+    r2_relative_glob_path: "dataset/processed/malay/cari.parquet"
+    text_column: body_text
+    cleaning_source: cari
+  - name: "HPLT Malay"
+    format: parquet
+    r2_relative_glob_path: "dataset/processed/malay/hplt/*_malay.parquet"
+    text_column: text
+    cleaning_source: hplt-malay
+    scheduling_weight: 8
+  - name: "HPLT Indonesia"
+    format: parquet
+    r2_relative_glob_path: "dataset/processed/malay/hplt/*_indon.parquet"
+    text_column: text
+    cleaning_source: hplt-indonesia
+    scheduling_weight: 12

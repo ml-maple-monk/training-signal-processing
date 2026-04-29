@@ -14,7 +14,7 @@ from training_signal_processing.core.models import RayConfig
 from training_signal_processing.core.storage import ObjectStore
 from training_signal_processing.core.submission import ArtifactStore
 from training_signal_processing.main import cli
-from training_signal_processing.pipelines.lid_metadata.books_ocr_cleanup import (
+from training_signal_processing.ops.books_ocr_cleanup import (
     CleanBooksOcrMarkdownOp,
     clean_books_ocr_markdown,
 )
