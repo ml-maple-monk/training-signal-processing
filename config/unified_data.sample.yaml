@@ -1,0 +1,72 @@
+run:
+  name: unified-data
+  config_version: 1
+
+ssh:
+  host: 127.0.0.1
+  port: 22
+  user: root
+  identity_file: ~/.ssh/id_ed25519
+
+remote:
+  root_dir: /tmp/training-signal-processing
+  python_version: "3.12"
+  remote_jobs_root: /tmp/unified-data-jobs
+  pgid_wait_attempts: 20
+  pgid_wait_sleep_seconds: 0.25
+  sync_paths:
+    - pyproject.toml
+    - uv.lock
+    - src
+    - config
+
+ray:
+  executor_type: ray
+  batch_size: 1
+  concurrency: 2
+  target_num_blocks: 512
+
+r2:
+  config_file: r2
+  bucket: gpu-poor
+  output_prefix: dataset/processed/unified-data
+
+input:
+  source_root_key: dataset
+  lid_metadata_output_prefix: dataset/processed/lid-metadata
+  lid_run_id: 20260429T015335Z
+  source_cleaning_output_prefix: dataset/processed/source-cleaning
+  source_cleaning_run_id: source-cleaning-full-20260429T171532Z
+  allow_partial_upstream: false
+  include_cleaning_sources: ""
+
+export:
+  rows_per_row_group: 500000
+  tokenizer_encoding: o200k_base
+  tokenizer_threads: 8
+  ray_num_cpus_per_worker: 2
+  merge_engine: duckdb
+  duckdb_threads: 2
+  parquet_compression: snappy
+  parquet_compression_level: 1
+
+mlflow:
+  enabled: false
+  tracking_uri: ""
+  experiment_name: unified-data
+
+observability:
+  flush_interval_sec: 5
+  log_per_file_events: true
+  heartbeat_interval_sec: 10
+
+resumability:
+  strategy: batch_manifest
+  commit_every_batches: 1
+  resume_mode: latest
+
+ops:
+  - name: prepare_unified_data_part
+    type: mapper
+  - name: write_unified_data_part
+    type: mapper

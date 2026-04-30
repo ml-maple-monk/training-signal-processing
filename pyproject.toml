@@ -68,6 +68,17 @@ source_cleaning = [
     "tiktoken>=0.12.0",
     "tqdm>=4.67.1",
 ]
+unified_data = [
+    "boto3>=1.39.0",
+    "click>=8.1.8",
+    "mlflow-skinny>=2.22.0",
+    "polars>=1.36,<2",
+    "pyarrow>=20.0.0",
+    "pyyaml>=6.0.2",
+    "ray[data]>=2.49.0",
+    "tiktoken>=0.12.0",
+    "tqdm>=4.67.1",
+]
 lid_metadata = [
     "boto3>=1.39.0",
     "click>=8.1.8",

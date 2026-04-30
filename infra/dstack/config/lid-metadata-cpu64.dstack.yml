@@ -20,6 +20,9 @@ env:
   - LID_METADATA_CONFIG_OBJECT_KEY
   - LID_METADATA_INPUT_MANIFEST_KEY
   - LID_METADATA_UPLOADED_ITEMS
+  - RAY_DEFAULT_OBJECT_STORE_MEMORY_PROPORTION=0.2
+  - RAY_OBJECT_STORE_MEMORY_BYTES=51539607552
+  - RAY_OBJECT_STORE_ALLOW_SLOW_STORAGE=1
   - RAY_CLUSTER_WAIT_SECONDS=900
 
 commands:
@@ -36,7 +39,20 @@ commands:
       fi
     done
     echo "[lid-dstack] Required runtime environment is present"
+    export RAY_DEFAULT_OBJECT_STORE_MEMORY_PROPORTION="${RAY_DEFAULT_OBJECT_STORE_MEMORY_PROPORTION:-0.2}"
+    export RAY_OBJECT_STORE_MEMORY_BYTES="${RAY_OBJECT_STORE_MEMORY_BYTES:-51539607552}"
+    export RAY_OBJECT_STORE_ALLOW_SLOW_STORAGE="${RAY_OBJECT_STORE_ALLOW_SLOW_STORAGE:-1}"
     export RAY_PYTHON_EXECUTABLE=/app/.venv/bin/python
+    /app/.venv/bin/ray stop --force >/dev/null 2>&1 || true
+    /app/.venv/bin/ray start \
+      --head \
+      --node-ip-address=127.0.0.1 \
+      --port=6379 \
+      --num-cpus=64 \
+      --object-store-memory="$RAY_OBJECT_STORE_MEMORY_BYTES" \
+      --temp-dir=/tmp/ray \
+      --disable-usage-stats
+    export RAY_ADDRESS=127.0.0.1:6379
     /app/.venv/bin/python -m training_signal_processing.main \
       lid-metadata-remote-job \
       --run-id "$LID_METADATA_RUN_ID" \

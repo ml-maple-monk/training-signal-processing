@@ -31,6 +31,11 @@ from .pipelines.source_cleaning.config import (
 )
 from .pipelines.source_cleaning.runtime import source_cleaning_remote_job_cli
 from .pipelines.source_cleaning.submission import SourceCleaningSubmissionAdapter
+from .pipelines.unified_data.config import (
+    load_recipe_config as load_unified_data_config,
+)
+from .pipelines.unified_data.runtime import unified_data_remote_job_cli
+from .pipelines.unified_data.submission import UnifiedDataSubmissionAdapter
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
 
@@ -44,6 +49,7 @@ cli.add_command(ocr_remote_job_cli, name="ocr-remote-job")
 cli.add_command(source_accounting_remote_job_cli, name="source-accounting-remote-job")
 cli.add_command(lid_metadata_remote_job_cli, name="lid-metadata-remote-job")
 cli.add_command(source_cleaning_remote_job_cli, name="source-cleaning-remote-job")
+cli.add_command(unified_data_remote_job_cli, name="unified-data-remote-job")
 
 
 @cli.command("validate")
@@ -159,6 +165,38 @@ def source_cleaning_validate_command(
         click.echo(f"Validated source cleaning recipe: {' + '.join(str(p) for p in config_paths)}")
         click.echo(f"Run name: {config.run_name}")
         click.echo(f"Declared sources: {len(config.sources)}")
+        click.echo(f"Output prefix: {config.r2.output_prefix}")
+        click.echo(f"Resolved pipeline: {', '.join(pipeline.names)}")
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.command("unified-data-validate")
+@click.option(
+    "--config",
+    "config_paths",
+    required=True,
+    multiple=True,
+    type=click.Path(path_type=Path),
+)
+@click.option("--set", "overrides", multiple=True)
+def unified_data_validate_command(
+    config_paths: tuple[Path, ...],
+    overrides: tuple[str, ...],
+) -> None:
+    try:
+        base_path, overlay_paths = config_paths[0], config_paths[1:]
+        config = load_unified_data_config(
+            base_path,
+            list(overrides),
+            overlay_paths=overlay_paths,
+        )
+        pipeline = RegisteredOpRegistry().resolve_pipeline(config.ops)
+        click.echo(f"Validated unified data recipe: {' + '.join(str(p) for p in config_paths)}")
+        click.echo(f"Run name: {config.run_name}")
+        click.echo(f"LID run: {config.input.lid_run_id}")
+        click.echo(f"Source cleaning run: {config.input.source_cleaning_run_id}")
+        click.echo(f"Rows per row group: {config.export.rows_per_row_group}")
         click.echo(f"Output prefix: {config.r2.output_prefix}")
         click.echo(f"Resolved pipeline: {', '.join(pipeline.names)}")
     except Exception as exc:
@@ -332,6 +370,34 @@ def source_cleaning_run_command(
         raise click.ClickException(str(exc)) from exc
 
 
+@cli.command("unified-data-run")
+@click.option(
+    "--config",
+    "config_paths",
+    required=True,
+    multiple=True,
+    type=click.Path(path_type=Path),
+)
+@click.option("--dry-run", is_flag=True, default=False)
+@click.option("--set", "overrides", multiple=True)
+def unified_data_run_command(
+    config_paths: tuple[Path, ...],
+    dry_run: bool,
+    overrides: tuple[str, ...],
+) -> None:
+    try:
+        result = submit_unified_data_pipeline(
+            config_path=config_paths[0],
+            overlay_paths=config_paths[1:],
+            overrides=list(overrides),
+            dry_run=dry_run,
+            resume_run_id=None,
+        )
+        click.echo(json.dumps(result, indent=2, sort_keys=True))
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
 @cli.command("resume")
 @click.option(
     "--config",
@@ -411,6 +477,36 @@ def source_cleaning_resume_command(
 ) -> None:
     try:
         result = submit_source_cleaning_pipeline(
+            config_path=config_paths[0],
+            overlay_paths=config_paths[1:],
+            overrides=list(overrides),
+            dry_run=dry_run,
+            resume_run_id=run_id,
+        )
+        click.echo(json.dumps(result, indent=2, sort_keys=True))
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.command("unified-data-resume")
+@click.option(
+    "--config",
+    "config_paths",
+    required=True,
+    multiple=True,
+    type=click.Path(path_type=Path),
+)
+@click.option("--dry-run", is_flag=True, default=False)
+@click.option("--run-id", required=True)
+@click.option("--set", "overrides", multiple=True)
+def unified_data_resume_command(
+    config_paths: tuple[Path, ...],
+    dry_run: bool,
+    run_id: str,
+    overrides: tuple[str, ...],
+) -> None:
+    try:
+        result = submit_unified_data_pipeline(
             config_path=config_paths[0],
             overlay_paths=config_paths[1:],
             overrides=list(overrides),
@@ -560,6 +656,28 @@ def submit_source_cleaning_pipeline(
     config = load_source_cleaning_config(config_path, overrides, overlay_paths=overlay_paths)
     submission = SubmissionCoordinator(
         adapter=SourceCleaningSubmissionAdapter(
+            config=config,
+            config_path=config_path,
+            overrides=overrides,
+            overlay_paths=overlay_paths,
+        ),
+        artifact_store=R2ArtifactStore.from_config_file(config.r2),
+        remote_transport=SshRemoteTransport(config.ssh, config.remote),
+    )
+    return submission.submit(dry_run=dry_run, resume_run_id=resume_run_id).to_safe_dict()
+
+
+def submit_unified_data_pipeline(
+    *,
+    config_path: Path,
+    overrides: list[str],
+    dry_run: bool,
+    resume_run_id: str | None,
+    overlay_paths: tuple[Path, ...] = (),
+) -> dict[str, object]:
+    config = load_unified_data_config(config_path, overrides, overlay_paths=overlay_paths)
+    submission = SubmissionCoordinator(
+        adapter=UnifiedDataSubmissionAdapter(
             config=config,
             config_path=config_path,
             overrides=overrides,

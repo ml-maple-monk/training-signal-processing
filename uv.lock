@@ -3018,6 +3018,17 @@ text-cleaning = [
     { name = "polars" },
     { name = "pyahocorasick" },
 ]
+unified-data = [
+    { name = "boto3" },
+    { name = "click" },
+    { name = "mlflow-skinny" },
+    { name = "polars" },
+    { name = "pyarrow" },
+    { name = "pyyaml" },
+    { name = "ray", extra = ["data"] },
+    { name = "tiktoken" },
+    { name = "tqdm" },
+]
 
 [package.metadata]
 requires-dist = [{ name = "duckdb", specifier = ">=1.5.2" }]
@@ -3086,6 +3097,17 @@ source-cleaning = [
 text-cleaning = [
     { name = "polars", specifier = ">=1.36,<2" },
     { name = "pyahocorasick", specifier = ">=2.2,<3" },
+]
+unified-data = [
+    { name = "boto3", specifier = ">=1.39.0" },
+    { name = "click", specifier = ">=8.1.8" },
+    { name = "mlflow-skinny", specifier = ">=2.22.0" },
+    { name = "polars", specifier = ">=1.36,<2" },
+    { name = "pyarrow", specifier = ">=20.0.0" },
+    { name = "pyyaml", specifier = ">=6.0.2" },
+    { name = "ray", extras = ["data"], specifier = ">=2.49.0" },
+    { name = "tiktoken", specifier = ">=0.12.0" },
+    { name = "tqdm", specifier = ">=4.67.1" },
 ]
 
 [[package]]

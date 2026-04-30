@@ -4,8 +4,10 @@
 GPU pipelines on remote machines**, plus concrete pipeline packages on
 top of it: **OCR** (Marker on PDFs), **source accounting** (dataset
 inventory/token metadata), **LID metadata** (language-ID sidecars for
-processed parquet rows), and **example_echo** (a minimal reference
-pipeline). The shared layer is intentionally pipeline-agnostic;
+processed parquet rows), **source cleaning** (source-specific text
+cleanup), **unified data** (cleaned text + LID + domain metadata
+parquet export), and **example_echo** (a minimal reference pipeline).
+The shared layer is intentionally pipeline-agnostic;
 new pipelines plug in through small template bases and registered ops.
 This document captures the static structure (layers, contracts, frozen
 invariants) and the dynamic flow (submission → remote execution →
@@ -69,7 +71,8 @@ in-memory progress per batch.
 +--------------------------------------------------------------------+
 |  TOP — pipeline-specific                                           |
 |                                                                    |
-|  pipelines/ocr | source_accounting | lid_metadata                   |
+|  pipelines/ocr | source_accounting | lid_metadata | source_cleaning   |
+|  pipelines/unified_data                                             |
 |    models.py   ops.py   runtime.py   submission.py                  |
 +----------------------------|---------------------------------------+
                              |  pipelines compose ops + adapters
@@ -745,6 +748,17 @@ shards. Its throughput experiment knobs live in `lid:` (`row_batch_size`,
 `inner_parallelism`, checkpoint intervals, and experiment/variant names);
 metrics are emitted as checkpoint JSON, structured progress logs, and
 per-shard `.metrics.json` sidecars.
+
+**source_cleaning** (`pipelines/source_cleaning/`) reads source parquet row
+groups from R2, applies source-specific cleaning ops, and writes both native
+source shards and a stable nullable unified schema. Completion is tracked by
+per-row-group `done/` sentinels.
+
+**unified_data** (`pipelines/unified_data/`) is a downstream export pipeline
+that consumes completed LID metadata and source-cleaning runs from R2, joins
+them by `sample_uid`, computes exact `o200k_base` cleaned-text token counts,
+and writes global parquet parts with fixed row-group sizing. Its resume unit is
+the output part `done/` sentinel.
 
 ---
 
