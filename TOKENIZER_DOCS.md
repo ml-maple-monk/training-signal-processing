@@ -108,6 +108,51 @@ Aggregate sample metrics:
 | `reddit-indonesia` | 5000 | 0.73 | 123673 | 183989 | 1.488 | 4.151 | 4.172 | 5000/5000 |
 | `fineweb` | 5000 | 16.34 | 2836499 | 3764053 | 1.327 | 4.522 | 4.552 | 5000/5000 |
 
+## Comparison Against Other Tokenizers
+
+Comparison artifacts:
+
+- Full comparison JSON: `.runtime/tokenizers/experiments/20260501T213354Z-balanced-fineweb-1to1-full-b1024-t16/tokenizer_fertility_comparison.json`
+- Full comparison Markdown: `.runtime/tokenizers/experiments/20260501T213354Z-balanced-fineweb-1to1-full-b1024-t16/tokenizer_fertility_comparison.md`
+
+The comparison uses the same bounded stratified sample described above. HuggingFace tokenizers are evaluated with `add_special_tokens=False`; roundtrip uses `skip_special_tokens=False` and `clean_up_tokenization_spaces=False`.
+
+Reference tokenizers:
+
+- Previous local BPEasy tokenizer: `.runtime/tokenizers/20260501T201106Z-rclone-40g-t16-full-b1024-t16/tokenizer.json`
+- OLMo 3 tokenizer: `allenai/Olmo-3-7B-Instruct`, `GPT2TokenizerFast`, vocab `100278`
+- Qwen3 tokenizer: `Qwen/Qwen3-0.6B`, `Qwen2TokenizerFast`, vocab `151669`
+
+Aggregate comparison:
+
+| Tokenizer | Vocab | Fertility | Chars/token | Bytes/token | Tokens/1000 chars | Roundtrip | Encoded tokens |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `local_bpeasy_balanced_1to1` | 50000 | 1.406 | 4.953 | 4.973 | 201.913 | 30650/30650 | 24551254 |
+| `local_bpeasy_previous_40g_cache` | 50000 | 1.369 | 5.084 | 5.105 | 196.677 | 30650/30650 | 23914634 |
+| `olmo3_7b_instruct` | 100278 | 1.955 | 3.561 | 3.575 | 280.846 | 30650/30650 | 34149062 |
+| `qwen3_0_6b` | 151669 | 1.982 | 3.513 | 3.527 | 284.676 | 30650/30650 | 34614789 |
+
+Relative to the current local balanced tokenizer:
+
+- The previous local BPEasy tokenizer uses `2.59%` fewer tokens per whitespace word.
+- OLMo 3 uses `39.09%` more tokens per whitespace word.
+- Qwen3 uses `40.99%` more tokens per whitespace word.
+
+Per-source fertility comparison:
+
+| Source | Current local BPEasy | Previous local BPEasy | OLMo 3 | Qwen3 |
+| --- | ---: | ---: | ---: | ---: |
+| `books-ocr` | 1.545 | 1.492 | 2.128 | 2.169 |
+| `cari` | 1.509 | 1.444 | 2.143 | 2.171 |
+| `hplt-indonesia` | 1.288 | 1.247 | 1.909 | 1.924 |
+| `hplt-malay` | 1.429 | 1.357 | 2.263 | 2.288 |
+| `lowyat` | 1.400 | 1.417 | 1.435 | 1.462 |
+| `reddit-bolehland` | 1.286 | 1.305 | 1.308 | 1.313 |
+| `reddit-indonesia` | 1.488 | 1.451 | 1.859 | 1.867 |
+| `fineweb` | 1.327 | 1.378 | 1.295 | 1.321 |
+
+All four tokenizers round-tripped all `30650` sampled documents exactly. OLMo 3 and Qwen3 emitted model-context warnings for some long OCR documents during the comparison; this means those documents exceed the model context window, not that tokenizer encoding failed.
+
 ## Runtime Evidence
 
 - User time (seconds): `28288.14`
