@@ -1,0 +1,13 @@
+.git/
+.venv/
+.venv-*/
+.pytest_cache/
+.ruff_cache/
+.import_linter_cache/
+.cache/
+.omx/
+analysis/source/
+analysis/source/outputs/
+final_output/
+infra/credentials/
+r2

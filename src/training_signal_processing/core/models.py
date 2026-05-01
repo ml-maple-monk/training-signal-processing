@@ -46,6 +46,7 @@ class RayTransformResources:
     concurrency: int | None = None
     num_gpus: float | None = None
     num_cpus: float | None = None
+    memory: int | None = None
 
     def to_dict(self) -> dict[str, int | float | None]:
         return asdict(self)

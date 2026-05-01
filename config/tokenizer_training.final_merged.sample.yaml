@@ -1,0 +1,54 @@
+run:
+  name: tokenizer-training-final-merged
+  config_version: 1
+
+r2:
+  config_file: r2
+  bucket: gpu-poor
+  output_prefix: ""
+
+input:
+  final_parts_prefix: dataset/processed/unified-data/final-completed-20260430T160615Z/parts/
+  text_column: cleaned_text
+  source_column: cleaning_source
+  dropped_column: cleaning_is_dropped
+  read_batch_rows: 4096
+  source_parts_prefixes:
+    fineweb: dataset/processed/fineweb-unified/20260501T144323Z/parts/
+  sources:
+    - books-ocr
+    - cari
+    - hplt-indonesia
+    - hplt-malay
+    - lowyat
+    - reddit-bolehland
+    - reddit-indonesia
+    - fineweb
+
+training:
+  vocab_size: 50000
+  max_token_length: 128
+  regex_pattern: "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  special_tokens: []
+  fill_to_nearest_multiple_of_eight: true
+  name: final-merged-bpeasy
+  bpeasy_batch_size: 256
+  export_huggingface: true
+  export_tiktoken: true
+
+budget:
+  max_wall_seconds: 0
+  max_memory_gib: 0
+  max_sample_rows: 0
+  max_sample_bytes: 0
+
+checkpoint:
+  enabled: true
+  export_interval_seconds: 1200
+  export_grace_seconds: 300
+  keep_last: 18
+  latest_name: latest
+
+output:
+  root_dir: .runtime/tokenizers
+  run_id: ""

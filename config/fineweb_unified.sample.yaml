@@ -1,0 +1,82 @@
+run:
+  name: fineweb-unified
+  config_version: 1
+
+ssh:
+  host: 127.0.0.1
+  port: 22
+  user: root
+  identity_file: ~/.ssh/id_ed25519
+
+remote:
+  root_dir: /tmp/training-signal-processing
+  python_version: "3.12"
+  remote_jobs_root: /tmp/fineweb-unified-jobs
+  pgid_wait_attempts: 20
+  pgid_wait_sleep_seconds: 0.25
+  sync_paths:
+    - pyproject.toml
+    - uv.lock
+    - src
+    - config
+
+ray:
+  executor_type: ray
+  batch_size: 1
+  concurrency: 4
+  target_num_blocks: 8192
+
+r2:
+  config_file: r2
+  bucket: gpu-poor
+  output_prefix: dataset/processed/fineweb-unified
+
+input:
+  source_root_key: hf://datasets
+  dataset_name: HuggingFaceFW/fineweb
+  dataset_configs:
+    - default
+  split: train
+  source_name: FineWeb
+  cleaning_source: fineweb
+  text_column: text
+  hf_token_env_var: HF_TOKEN
+  discovery_sample_rows_per_config: 50000
+  shuffle_seed: 42
+  shuffle_buffer_size: 1024
+  stream_shards_per_config: 1
+  enforce_month_filter: false
+
+export:
+  byte_cap: 84470960868
+  part_target_bytes: 16000000
+  rows_per_row_group: 128000
+  write_batch_rows: 2048
+  compute_exact_token_counts: false
+  tokenizer_encoding: o200k_base
+  tokenizer_threads: 8
+  ray_num_cpus_per_worker: 1
+  ray_memory_gib_per_worker: 16
+  parquet_compression: none
+  parquet_compression_level: 1
+
+mlflow:
+  enabled: false
+  tracking_uri: ""
+  experiment_name: fineweb-unified
+
+observability:
+  flush_interval_sec: 5
+  log_per_file_events: true
+  heartbeat_interval_sec: 10
+
+resumability:
+  strategy: batch_manifest
+  commit_every_batches: 1
+  resume_mode: latest
+
+ops:
+  - name: prepare_fineweb_unified_part
+    type: mapper
+  - name: write_fineweb_unified_part
+    type: mapper

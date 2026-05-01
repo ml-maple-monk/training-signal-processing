@@ -51,6 +51,7 @@ class DatasetBuilder(ABC):
         concurrency: int | None = None,
         num_gpus: float | None = None,
         num_cpus: float | None = None,
+        memory: int | None = None,
     ) -> DatasetHandle:
         raise NotImplementedError
 
@@ -83,6 +84,7 @@ class RayDatasetBuilder(DatasetBuilder):
         concurrency: int | None = None,
         num_gpus: float | None = None,
         num_cpus: float | None = None,
+        memory: int | None = None,
     ) -> DatasetHandle:
         if batch_size <= 0:
             raise ValueError("RayDatasetBuilder batch_size must be positive.")
@@ -108,6 +110,8 @@ class RayDatasetBuilder(DatasetBuilder):
             map_kwargs["num_gpus"] = num_gpus
         if num_cpus is not None:
             map_kwargs["num_cpus"] = num_cpus
+        if memory is not None:
+            map_kwargs["memory"] = memory
         next_dataset = dataset.unwrap().map_batches(
             mapper,
             **map_kwargs,

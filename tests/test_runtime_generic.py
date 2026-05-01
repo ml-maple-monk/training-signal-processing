@@ -88,7 +88,9 @@ class SimpleDatasetBuilder(DatasetBuilder):
         concurrency: int | None = None,
         num_gpus: float | None = None,
         num_cpus: float | None = None,
+        memory: int | None = None,
     ) -> DatasetHandle:
+        del memory
         rows = dataset.unwrap()
         rendered_rows: list[dict[str, object]] = []
         for index in range(0, len(rows), batch_size):
@@ -109,6 +111,7 @@ class RecordingDatasetBuilder(SimpleDatasetBuilder):
         concurrency: int | None = None,
         num_gpus: float | None = None,
         num_cpus: float | None = None,
+        memory: int | None = None,
     ) -> DatasetHandle:
         self.transform_calls.append(
             {
@@ -117,6 +120,7 @@ class RecordingDatasetBuilder(SimpleDatasetBuilder):
                 "concurrency": concurrency,
                 "num_gpus": num_gpus,
                 "num_cpus": num_cpus,
+                "memory": memory,
             }
         )
         return super().apply_op_transform(
@@ -126,6 +130,7 @@ class RecordingDatasetBuilder(SimpleDatasetBuilder):
             concurrency=concurrency,
             num_gpus=num_gpus,
             num_cpus=num_cpus,
+            memory=memory,
         )
 
 
@@ -579,6 +584,7 @@ def test_streaming_executor_uses_adapter_transform_resources() -> None:
             "concurrency": None,
             "num_gpus": None,
             "num_cpus": None,
+            "memory": None,
         },
         {
             "op_name": "test_transform_generic",
@@ -586,6 +592,7 @@ def test_streaming_executor_uses_adapter_transform_resources() -> None:
             "concurrency": 2,
             "num_gpus": 0.5,
             "num_cpus": 4.0,
+            "memory": None,
         },
         {
             "op_name": "test_export_generic",
@@ -593,5 +600,6 @@ def test_streaming_executor_uses_adapter_transform_resources() -> None:
             "concurrency": None,
             "num_gpus": None,
             "num_cpus": None,
+            "memory": None,
         },
     ]

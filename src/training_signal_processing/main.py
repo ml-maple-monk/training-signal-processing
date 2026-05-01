@@ -13,6 +13,11 @@ from .core.submission import (
 )
 from .core.utils import join_s3_key, read_jsonl_rows
 from .ops.registry import RegisteredOpRegistry
+from .pipelines.fineweb_unified.config import (
+    load_recipe_config as load_fineweb_unified_config,
+)
+from .pipelines.fineweb_unified.runtime import fineweb_unified_remote_job_cli
+from .pipelines.fineweb_unified.submission import FineWebUnifiedSubmissionAdapter
 from .pipelines.lid_metadata.config import (
     load_recipe_config as load_lid_metadata_config,
 )
@@ -31,6 +36,10 @@ from .pipelines.source_cleaning.config import (
 )
 from .pipelines.source_cleaning.runtime import source_cleaning_remote_job_cli
 from .pipelines.source_cleaning.submission import SourceCleaningSubmissionAdapter
+from .pipelines.tokenizer_training.config import (
+    load_recipe_config as load_tokenizer_training_config,
+)
+from .pipelines.tokenizer_training.runtime import run_tokenizer_training
 from .pipelines.unified_data.config import (
     load_recipe_config as load_unified_data_config,
 )
@@ -50,6 +59,7 @@ cli.add_command(source_accounting_remote_job_cli, name="source-accounting-remote
 cli.add_command(lid_metadata_remote_job_cli, name="lid-metadata-remote-job")
 cli.add_command(source_cleaning_remote_job_cli, name="source-cleaning-remote-job")
 cli.add_command(unified_data_remote_job_cli, name="unified-data-remote-job")
+cli.add_command(fineweb_unified_remote_job_cli, name="fineweb-unified-remote-job")
 
 
 @cli.command("validate")
@@ -199,6 +209,69 @@ def unified_data_validate_command(
         click.echo(f"Rows per row group: {config.export.rows_per_row_group}")
         click.echo(f"Output prefix: {config.r2.output_prefix}")
         click.echo(f"Resolved pipeline: {', '.join(pipeline.names)}")
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.command("fineweb-unified-validate")
+@click.option(
+    "--config",
+    "config_paths",
+    required=True,
+    multiple=True,
+    type=click.Path(path_type=Path),
+)
+@click.option("--set", "overrides", multiple=True)
+def fineweb_unified_validate_command(
+    config_paths: tuple[Path, ...],
+    overrides: tuple[str, ...],
+) -> None:
+    try:
+        base_path, overlay_paths = config_paths[0], config_paths[1:]
+        config = load_fineweb_unified_config(
+            base_path,
+            list(overrides),
+            overlay_paths=overlay_paths,
+        )
+        pipeline = RegisteredOpRegistry().resolve_pipeline(config.ops)
+        click.echo(f"Validated FineWeb unified recipe: {' + '.join(str(p) for p in config_paths)}")
+        click.echo(f"Run name: {config.run_name}")
+        click.echo(f"Dataset: {config.input.dataset_name}")
+        click.echo(f"Byte cap: {config.export.byte_cap}")
+        click.echo(f"Output prefix: {config.r2.output_prefix}")
+        click.echo(f"Resolved pipeline: {', '.join(pipeline.names)}")
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.command("tokenizer-training-validate")
+@click.option(
+    "--config",
+    "config_paths",
+    required=True,
+    multiple=True,
+    type=click.Path(path_type=Path),
+)
+@click.option("--set", "overrides", multiple=True)
+def tokenizer_training_validate_command(
+    config_paths: tuple[Path, ...],
+    overrides: tuple[str, ...],
+) -> None:
+    try:
+        base_path, overlay_paths = config_paths[0], config_paths[1:]
+        config = load_tokenizer_training_config(
+            base_path,
+            list(overrides),
+            overlay_paths=overlay_paths,
+        )
+        click.echo(
+            f"Validated tokenizer training recipe: {' + '.join(str(p) for p in config_paths)}"
+        )
+        click.echo(f"Run name: {config.run_name}")
+        click.echo(f"Vocab size: {config.training.vocab_size}")
+        click.echo(f"Declared sources: {len(config.input.sources)}")
+        click.echo(f"Final parts prefix: {config.input.final_parts_prefix}")
+        click.echo(f"Output root: {config.output.root_dir}")
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -398,6 +471,62 @@ def unified_data_run_command(
         raise click.ClickException(str(exc)) from exc
 
 
+@cli.command("fineweb-unified-run")
+@click.option(
+    "--config",
+    "config_paths",
+    required=True,
+    multiple=True,
+    type=click.Path(path_type=Path),
+)
+@click.option("--dry-run", is_flag=True, default=False)
+@click.option("--set", "overrides", multiple=True)
+def fineweb_unified_run_command(
+    config_paths: tuple[Path, ...],
+    dry_run: bool,
+    overrides: tuple[str, ...],
+) -> None:
+    try:
+        result = submit_fineweb_unified_pipeline(
+            config_path=config_paths[0],
+            overlay_paths=config_paths[1:],
+            overrides=list(overrides),
+            dry_run=dry_run,
+            resume_run_id=None,
+        )
+        click.echo(json.dumps(result, indent=2, sort_keys=True))
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.command("tokenizer-training-run")
+@click.option(
+    "--config",
+    "config_paths",
+    required=True,
+    multiple=True,
+    type=click.Path(path_type=Path),
+)
+@click.option("--dry-run", is_flag=True, default=False)
+@click.option("--set", "overrides", multiple=True)
+def tokenizer_training_run_command(
+    config_paths: tuple[Path, ...],
+    dry_run: bool,
+    overrides: tuple[str, ...],
+) -> None:
+    try:
+        base_path, overlay_paths = config_paths[0], config_paths[1:]
+        config = load_tokenizer_training_config(
+            base_path,
+            list(overrides),
+            overlay_paths=overlay_paths,
+        )
+        result = run_tokenizer_training(config, dry_run=dry_run)
+        click.echo(json.dumps(result, indent=2, sort_keys=True))
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
 @cli.command("resume")
 @click.option(
     "--config",
@@ -507,6 +636,36 @@ def unified_data_resume_command(
 ) -> None:
     try:
         result = submit_unified_data_pipeline(
+            config_path=config_paths[0],
+            overlay_paths=config_paths[1:],
+            overrides=list(overrides),
+            dry_run=dry_run,
+            resume_run_id=run_id,
+        )
+        click.echo(json.dumps(result, indent=2, sort_keys=True))
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.command("fineweb-unified-resume")
+@click.option(
+    "--config",
+    "config_paths",
+    required=True,
+    multiple=True,
+    type=click.Path(path_type=Path),
+)
+@click.option("--dry-run", is_flag=True, default=False)
+@click.option("--run-id", required=True)
+@click.option("--set", "overrides", multiple=True)
+def fineweb_unified_resume_command(
+    config_paths: tuple[Path, ...],
+    dry_run: bool,
+    run_id: str,
+    overrides: tuple[str, ...],
+) -> None:
+    try:
+        result = submit_fineweb_unified_pipeline(
             config_path=config_paths[0],
             overlay_paths=config_paths[1:],
             overrides=list(overrides),
@@ -687,6 +846,62 @@ def submit_unified_data_pipeline(
         remote_transport=SshRemoteTransport(config.ssh, config.remote),
     )
     return submission.submit(dry_run=dry_run, resume_run_id=resume_run_id).to_safe_dict()
+
+
+def submit_fineweb_unified_pipeline(
+    *,
+    config_path: Path,
+    overrides: list[str],
+    dry_run: bool,
+    resume_run_id: str | None,
+    overlay_paths: tuple[Path, ...] = (),
+) -> dict[str, object]:
+    config = load_fineweb_unified_config(config_path, overrides, overlay_paths=overlay_paths)
+    submission = SubmissionCoordinator(
+        adapter=FineWebUnifiedSubmissionAdapter(
+            config=config,
+            config_path=config_path,
+            overrides=overrides,
+            overlay_paths=overlay_paths,
+        ),
+        artifact_store=R2ArtifactStore.from_config_file(config.r2),
+        remote_transport=SshRemoteTransport(config.ssh, config.remote),
+    )
+    return submission.submit(dry_run=dry_run, resume_run_id=resume_run_id).to_safe_dict()
+
+
+@cli.command("explore-cleaned")
+@click.option(
+    "--config-file",
+    "config_file",
+    type=click.Path(path_type=str),
+    default=None,
+    help=(
+        "Path to env-style file with R2 credentials "
+        "(R2_BUCKET_NAME, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, "
+        "AWS_DEFAULT_REGION, MLFLOW_S3_ENDPOINT_URL). "
+        "If omitted, reads OS env vars R2_BUCKET / R2_ACCESS_KEY_ID / "
+        "R2_SECRET_ACCESS_KEY / R2_REGION / R2_ENDPOINT_URL."
+    ),
+)
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", type=int, default=7860, show_default=True)
+@click.option("--share/--no-share", default=False, show_default=True)
+def explore_cleaned_command(
+    config_file: str | None,
+    host: str,
+    port: int,
+    share: bool,
+) -> None:
+    """Launch a Gradio explorer for the cleaned unified dataset on R2.
+
+    Streams random rows via DuckDB. Data is NEVER downloaded to local disk.
+    Per-click latency is typically a few seconds (cross-shard random sample
+    over R2). Requires the `ui` dependency group: `uv sync --group ui`.
+    """
+    from .pipelines.unified_data.explorer_app import launch
+
+    launch(config_file=config_file, host=host, port=port, share=share)
 
 
 def build_op_runtime_context(config, op_name: str) -> OpRuntimeContext:  # type: ignore[no-untyped-def]

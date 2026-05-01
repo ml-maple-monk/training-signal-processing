@@ -8,6 +8,9 @@ not compressed parquet object sizes.
 Final R2 prefix:
 `r2://ocrresults:gpu-poor/dataset/processed/unified-data/final-completed-20260430T160615Z`
 
+FineWeb add-on R2 prefix:
+`r2://ocrresults:gpu-poor/dataset/processed/fineweb-unified/20260501T144323Z`
+
 Parquet parts: `78`
 
 Cleaned text column: `cleaned_text`
@@ -43,6 +46,39 @@ Token column: `cleaned_o200k_token_count`
 | `20260429T214659Z` | base-completed | 61 | 30,049,521 | 14,987,206,599 | `part-000036 error` |
 | `unified-data-delta-lid-20260430T0228Z` | delta-lid-completed | 17 | 8,500,000 | 6,813,237,390 | `part-000017 no-done` |
 
+## FineWeb Add-On Run
+
+FineWeb is being written as a separate unified-format dataset prefix, not copied
+into the completed final prefix above.
+
+| item | R2 path |
+| --- | --- |
+| run root | `r2://ocrresults:gpu-poor/dataset/processed/fineweb-unified/20260501T144323Z` |
+| parquet parts prefix | `r2://ocrresults:gpu-poor/dataset/processed/fineweb-unified/20260501T144323Z/parts/` |
+| done sentinels prefix | `r2://ocrresults:gpu-poor/dataset/processed/fineweb-unified/20260501T144323Z/done/` |
+| metrics prefix | `r2://ocrresults:gpu-poor/dataset/processed/fineweb-unified/20260501T144323Z/metrics/` |
+| error sentinels prefix | `r2://ocrresults:gpu-poor/dataset/processed/fineweb-unified/20260501T144323Z/errors/` |
+| input manifest | `r2://ocrresults:gpu-poor/dataset/processed/fineweb-unified/20260501T144323Z/control/input_manifest.jsonl` |
+| run recipe | `r2://ocrresults:gpu-poor/dataset/processed/fineweb-unified/20260501T144323Z/control/recipe.json` |
+
+Latest FineWeb R2 status as of 2026-05-01 16:50 UTC:
+
+| item | value |
+| --- | ---: |
+| planned manifest rows / parquet parts | 5,280 |
+| manifest months | `2021-11`: 2,640; `2021-12`: 2,640 |
+| configured stream shards per config | 1 |
+| strict real collection-date filtering | disabled |
+| exact token counting | disabled |
+| written parquet parts | 86 |
+| done sentinels | 86 |
+| metrics sidecars | 86 |
+| error sentinels | 0 |
+
+The latest planned parquet output path pattern is:
+
+`r2://ocrresults:gpu-poor/dataset/processed/fineweb-unified/20260501T144323Z/parts/month=<YYYYMM>/part-<NNNNNN>.parquet`
+
 ## Notes
 
 - The final parquet is not partitioned by source; all source rows are colocated
@@ -55,3 +91,9 @@ Token column: `cleaned_o200k_token_count`
 - This report covers only done-confirmed final parquet copied into the
   consolidated prefix. It excludes any upstream payload without a done sentinel
   or with an error sentinel.
+- FineWeb output is tracked separately under the FineWeb add-on prefix. The run
+  is in progress; do not add it to the final totals until corresponding
+  `done/` and `metrics/` sidecars are present and scanned.
+- FineWeb month directories are relaxed assignment buckets for this speed-up
+  run. The row-level `timestamp` still preserves FineWeb metadata, but output is
+  no longer strictly filtered to real collection-date month partitions.

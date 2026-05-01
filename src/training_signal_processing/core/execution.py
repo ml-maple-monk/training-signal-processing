@@ -531,6 +531,7 @@ class StreamingRayExecutor(Executor):
             concurrency=resources.concurrency,
             num_gpus=resources.num_gpus,
             num_cpus=resources.num_cpus,
+            memory=resources.memory,
         )
         context.tracer.trace_after_op(op)
         return transformed

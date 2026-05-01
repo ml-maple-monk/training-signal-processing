@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
 from training_signal_processing.core.submission import R2ArtifactStore
 from training_signal_processing.main import cli
@@ -31,6 +32,11 @@ def test_main_cli_registers_ocr_remote_job_command() -> None:
     assert "ocr-remote-job" in cli.commands
 
 
+def test_main_cli_registers_tokenizer_training_commands() -> None:
+    assert "tokenizer-training-validate" in cli.commands
+    assert "tokenizer-training-run" in cli.commands
+
+
 def test_main_module_entrypoint_shows_help() -> None:
     result = subprocess.run(
         [sys.executable, "-m", "training_signal_processing.main", "--help"],
@@ -42,6 +48,26 @@ def test_main_module_entrypoint_shows_help() -> None:
     assert result.returncode == 0
     assert "Remote OCR commands." in result.stdout
     assert "ocr-remote-job" in result.stdout
+    assert "tokenizer-training-run" in result.stdout
+
+
+def test_tokenizer_training_run_dry_run_outputs_plan() -> None:
+    result = CliRunner().invoke(
+        cli,
+        [
+            "tokenizer-training-run",
+            "--config",
+            "config/tokenizer_training.final_merged.sample.yaml",
+            "--dry-run",
+            "--set",
+            "output.run_id=test-tokenizer-dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert '"mode": "dry_run"' in result.output
+    assert '"run_id": "test-tokenizer-dry-run"' in result.output
+    assert '"vocab_size": 50000' in result.output
 
 
 def test_ocr_submission_uses_package_cli_entrypoint(
