@@ -54,6 +54,8 @@ The reproduction command re-encodes the same bounded local parquet sample with
 the tracked SuperBPE tokenizer, writes fresh evaluation JSON/Markdown under
 `.runtime/tokenizers/experiments/native_superbpe_1m_rows_max4w/`, and checks the
 result against `analysis/tokenizer/native_superbpe_1m_rows_max4w_expected.json`.
+The last reproduced JSON and Markdown snapshot is checked into the repo under
+`analysis/tokenizer/experiments/native_superbpe_1m_rows_max4w/`.
 
 ```bash
 uv run --group tokenizer_training python analysis/tokenizer/reproduce_native_superbpe_1m_rows_max4w.py
@@ -67,7 +69,7 @@ JSON without rereading the parquet cache:
 
 ```bash
 uv run --group tokenizer_training python analysis/tokenizer/reproduce_native_superbpe_1m_rows_max4w.py \
-  --input-json .runtime/tokenizers/experiments/native_superbpe_1m_rows_max4w/superbpe_tokenizer_evaluation.json
+  --input-json analysis/tokenizer/experiments/native_superbpe_1m_rows_max4w/superbpe_tokenizer_evaluation.json
 ```
 
 ## Aggregate Performance
@@ -122,8 +124,8 @@ the earlier 100k-row SuperBPE run, it uses `3.77%` fewer tokens (`22603105` vs
 - Tracked SuperBPE tokenizer: `tokenizers/native_superbpe_1m_rows_max4w/tokenizer.json`
 - Tracked BPEasy baseline tokenizer: `tokenizers/local_bpeasy_balanced_1to1/tokenizer.json`
 - Tracked previous BPEasy tokenizer: `tokenizers/local_bpeasy_previous_40g_cache/tokenizer.json`
-- SuperBPE evaluation JSON: `.runtime/tokenizers/experiments/superbpe-interleaved-1m-oneline-besteffort-20260502T215607Z/superbpe_tokenizer_evaluation.json`
-- SuperBPE evaluation Markdown: `.runtime/tokenizers/experiments/superbpe-interleaved-1m-oneline-besteffort-20260502T215607Z/superbpe_tokenizer_evaluation.md`
+- Tracked SuperBPE evaluation JSON: `analysis/tokenizer/experiments/native_superbpe_1m_rows_max4w/superbpe_tokenizer_evaluation.json`
+- Tracked SuperBPE evaluation Markdown: `analysis/tokenizer/experiments/native_superbpe_1m_rows_max4w/superbpe_tokenizer_evaluation.md`
 - BPEasy baseline evaluation JSON: `.runtime/tokenizers/experiments/20260501T213354Z-balanced-fineweb-1to1-full-b1024-t16/tokenizer_evaluation.json`
 - Full external-tokenizer comparison JSON: `.runtime/tokenizers/experiments/20260501T213354Z-balanced-fineweb-1to1-full-b1024-t16/tokenizer_fertility_comparison.json`
 
