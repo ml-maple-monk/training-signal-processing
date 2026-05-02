@@ -10,6 +10,15 @@ Use `native_superbpe_1m_rows_max4w` as the current best tokenizer.
 - Vocab size: `50000`
 - Max token length: `32`
 
+Tracked comparison tokenizer artifacts:
+
+- `local_bpeasy_balanced_1to1`: `tokenizers/local_bpeasy_balanced_1to1/tokenizer.json`
+- `local_bpeasy_previous_40g_cache`: `tokenizers/local_bpeasy_previous_40g_cache/tokenizer.json`
+
+The SuperBPE artifact is a HuggingFace `tokenizers` JSON. The two BPEEasy
+comparison artifacts are BPEEasy JSON files and should be loaded with
+`bpeasy.tokenizer.BPEasyTokenizer`.
+
 Load it with HuggingFace `tokenizers` for encoding:
 
 ```python
@@ -38,6 +47,28 @@ tokenizer comparisons:
 - up to `5000` documents per source
 - up to `33554432` UTF-8 bytes per source
 - FineWeb files sampled evenly across `2098` cached FineWeb parquet files
+
+## Rerun The Fertility Experiment
+
+The reproduction command re-encodes the same bounded local parquet sample with
+the tracked SuperBPE tokenizer, writes fresh evaluation JSON/Markdown under
+`.runtime/tokenizers/experiments/native_superbpe_1m_rows_max4w/`, and checks the
+result against `analysis/tokenizer/native_superbpe_1m_rows_max4w_expected.json`.
+
+```bash
+uv run --group tokenizer_training python analysis/tokenizer/reproduce_native_superbpe_1m_rows_max4w.py
+```
+
+Prerequisite: the local parquet cache must exist at
+`.runtime/tokenizers/parquet-cache/20260501T211207Z-rclone-balanced-fineweb-1to1`.
+
+To verify the published expected metrics against an already generated evaluation
+JSON without rereading the parquet cache:
+
+```bash
+uv run --group tokenizer_training python analysis/tokenizer/reproduce_native_superbpe_1m_rows_max4w.py \
+  --input-json .runtime/tokenizers/experiments/native_superbpe_1m_rows_max4w/superbpe_tokenizer_evaluation.json
+```
 
 ## Aggregate Performance
 
@@ -88,6 +119,9 @@ the earlier 100k-row SuperBPE run, it uses `3.77%` fewer tokens (`22603105` vs
   `uv run --group tokenizer_training python analysis/tokenizer/reproduce_native_superbpe_1m_rows_max4w.py`
 - Expected metrics checked by the reproduction command:
   `analysis/tokenizer/native_superbpe_1m_rows_max4w_expected.json`
+- Tracked SuperBPE tokenizer: `tokenizers/native_superbpe_1m_rows_max4w/tokenizer.json`
+- Tracked BPEasy baseline tokenizer: `tokenizers/local_bpeasy_balanced_1to1/tokenizer.json`
+- Tracked previous BPEasy tokenizer: `tokenizers/local_bpeasy_previous_40g_cache/tokenizer.json`
 - SuperBPE evaluation JSON: `.runtime/tokenizers/experiments/superbpe-interleaved-1m-oneline-besteffort-20260502T215607Z/superbpe_tokenizer_evaluation.json`
 - SuperBPE evaluation Markdown: `.runtime/tokenizers/experiments/superbpe-interleaved-1m-oneline-besteffort-20260502T215607Z/superbpe_tokenizer_evaluation.md`
 - BPEasy baseline evaluation JSON: `.runtime/tokenizers/experiments/20260501T213354Z-balanced-fineweb-1to1-full-b1024-t16/tokenizer_evaluation.json`
