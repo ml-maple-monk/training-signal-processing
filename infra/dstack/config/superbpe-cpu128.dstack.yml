@@ -1,0 +1,45 @@
+type: task
+name: tsp-superbpe-train-fleet
+
+image: ${SUPERBPE_IMAGE}
+registry_auth:
+  username: ${VCR_USERNAME}
+  password: ${VCR_PASSWORD}
+
+env:
+  - SUPERBPE_IMAGE
+  - VCR_USERNAME
+  - VCR_PASSWORD
+  - SUPERBPE_RUN_ID=20260501T233054Z-superbpe-balanced-1to1-50k
+  - SUPERBPE_RAYON_NUM_THREADS=64
+  - SUPERBPE_TOKENIZERS_PARALLELISM=true
+  - SUPERBPE_MALLOC_ARENA_MAX=8
+
+commands:
+  - |
+    set -eu
+    echo "[superbpe-dstack] CPU count: $(nproc)"
+    echo "[superbpe-dstack] Memory:"
+    free -h
+    echo "[superbpe-dstack] Waiting for repo/cache rsync and training launch"
+    sleep infinity
+
+backends: [verda]
+regions: [FIN-03]
+instance_types: [CPU.64V.256G]
+fleets: [tsp-superbpe-cpu64-fleet]
+creation_policy: reuse
+resources:
+  cpu: 16..
+  memory: 128GB..
+  disk: 200GB..
+
+spot_policy: on-demand
+max_duration: 24h
+idle_duration: 0s
+
+retry:
+  on_events:
+    - no-capacity
+    - interruption
+  duration: 2h

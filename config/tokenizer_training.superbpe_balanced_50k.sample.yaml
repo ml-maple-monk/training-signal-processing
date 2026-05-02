@@ -1,0 +1,82 @@
+run:
+  name: tokenizer-training-superbpe-balanced-50k
+  config_version: 1
+
+r2:
+  config_file: r2
+  bucket: gpu-poor
+  output_prefix: ""
+
+input:
+  final_parts_prefix: dataset/processed/unified-data/final-completed-20260430T160615Z/parts/
+  text_column: cleaned_text
+  source_column: cleaning_source
+  dropped_column: cleaning_is_dropped
+  read_batch_rows: 4096
+  local_parquet_root: .runtime/tokenizers/parquet-cache/20260501T211207Z-rclone-balanced-fineweb-1to1
+  source_parts_prefixes:
+    fineweb: dataset/processed/fineweb-unified/20260501T144323Z/parts/
+  sources:
+    - books-ocr
+    - cari
+    - hplt-indonesia
+    - hplt-malay
+    - lowyat
+    - reddit-bolehland
+    - reddit-indonesia
+    - fineweb
+
+training:
+  backend: superbpe
+  vocab_size: 50000
+  max_token_length: 32
+  regex_pattern: "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  special_tokens: []
+  fill_to_nearest_multiple_of_eight: true
+  name: final-merged-superbpe
+  bpeasy_batch_size: 256
+  export_huggingface: false
+  export_tiktoken: false
+  superbpe:
+    enabled: true
+    engine: native
+    corpus_shard_bytes: 536870912
+    corpus_root: .runtime/tokenizers/corpora
+    runtime_root: .runtime/superbpe
+    native_manifest_path: rust/superbpe_native/Cargo.toml
+    repo_url: https://github.com/PythonNut/superbpe.git
+    repo_commit: bbd09768fc28a875cef48e6bdd66e3a17454628e
+    tokenizers_submodule_commit: 757f2a55c0820ed47064e1fe473deea39b7b611b
+    python_executable: python3.12
+    install_rust_if_missing: true
+    native_threads: 0
+    native_stage1_threads: 8
+    native_stage2_threads: 2
+    stage1_regex_pattern: "[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]*[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]+|[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]+[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]*|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+    stage2_regex_pattern: "\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]{2,}[\\r\\n/]*| +(?!\\S)"
+    stage2_inherit_merge_pairs: 39000
+    stage1_num_bytes: 0
+    stage2_num_bytes: 0
+    stage1_max_words_per_token: 0
+    stage2_max_words_per_token: 4
+    stage1_max_word_count_entries: 0
+    stage2_max_word_count_entries: 10000000
+    reuse_existing_corpus: true
+    reuse_existing_stages: true
+
+budget:
+  max_wall_seconds: 0
+  max_memory_gib: 0
+  max_sample_rows: 0
+  max_sample_bytes: 0
+
+checkpoint:
+  enabled: false
+  export_interval_seconds: 1200
+  export_grace_seconds: 300
+  keep_last: 0
+  latest_name: latest
+
+output:
+  root_dir: .runtime/tokenizers
+  run_id: ""

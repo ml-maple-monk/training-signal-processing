@@ -10,6 +10,17 @@ GPT4_REGEX_PATTERN = (
     r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|"""
     r"""\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"""
 )
+SUPERBPE_STAGE1_REGEX_PATTERN = (
+    r"""[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*"""
+    r"""[\p{Ll}\p{Lm}\p{Lo}\p{M}]+|"""
+    r"""[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+"""
+    r"""[\p{Ll}\p{Lm}\p{Lo}\p{M}]*|"""
+    r"""\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+"""
+)
+SUPERBPE_STAGE2_REGEX_PATTERN = r"""\p{N}{1,3}| ?[^\s\p{L}\p{N}]{2,}[\r\n/]*| +(?!\S)"""
+SUPERBPE_REPO_URL = "https://github.com/PythonNut/superbpe.git"
+SUPERBPE_REPO_COMMIT = "bbd09768fc28a875cef48e6bdd66e3a17454628e"
+SUPERBPE_TOKENIZERS_COMMIT = "757f2a55c0820ed47064e1fe473deea39b7b611b"
 
 
 @dataclass
@@ -21,12 +32,16 @@ class InputConfig:
     sources: list[str]
     read_batch_rows: int = 4096
     source_parts_prefixes: dict[str, str] = field(default_factory=dict)
+    local_parquet_root: str = ""
 
     def __post_init__(self) -> None:
         self.final_parts_prefix = self.final_parts_prefix.strip().lstrip("/")
         self.text_column = self.text_column.strip()
         self.source_column = self.source_column.strip()
         self.dropped_column = self.dropped_column.strip()
+        self.local_parquet_root = (
+            str(Path(self.local_parquet_root).expanduser()) if self.local_parquet_root else ""
+        )
         self.sources = [str(source).strip().lower().replace("_", "-") for source in self.sources]
         self.source_parts_prefixes = {
             str(source).strip().lower().replace("_", "-"): str(prefix).strip().lstrip("/")
@@ -66,7 +81,111 @@ class InputConfig:
 
 
 @dataclass
+class SuperBPEConfig:
+    enabled: bool = False
+    engine: str = "upstream"
+    corpus_shard_bytes: int = 512 * 1024 * 1024
+    corpus_root: str = ""
+    runtime_root: str = ".runtime/superbpe"
+    native_manifest_path: str = "rust/superbpe_native/Cargo.toml"
+    repo_url: str = SUPERBPE_REPO_URL
+    repo_commit: str = SUPERBPE_REPO_COMMIT
+    tokenizers_submodule_commit: str = SUPERBPE_TOKENIZERS_COMMIT
+    python_executable: str = "python3.12"
+    install_rust_if_missing: bool = True
+    native_threads: int = 0
+    native_stage1_threads: int = 0
+    native_stage2_threads: int = 0
+    stage1_regex_pattern: str = SUPERBPE_STAGE1_REGEX_PATTERN
+    stage2_regex_pattern: str = SUPERBPE_STAGE2_REGEX_PATTERN
+    stage2_inherit_merge_pairs: int = 39_000
+    stage1_num_bytes: int = 0
+    stage2_num_bytes: int = 0
+    stage1_max_words_per_token: int = 0
+    stage2_max_words_per_token: int = 0
+    stage1_max_word_count_entries: int = 0
+    stage2_max_word_count_entries: int = 0
+    reuse_existing_corpus: bool = True
+    reuse_existing_stages: bool = True
+
+    def __post_init__(self) -> None:
+        self.engine = self.engine.strip().lower()
+        self.corpus_root = str(Path(self.corpus_root).expanduser()) if self.corpus_root else ""
+        self.runtime_root = str(Path(self.runtime_root).expanduser())
+        self.native_manifest_path = str(Path(self.native_manifest_path).expanduser())
+        self.repo_url = self.repo_url.strip()
+        self.repo_commit = self.repo_commit.strip()
+        self.tokenizers_submodule_commit = self.tokenizers_submodule_commit.strip()
+        self.python_executable = self.python_executable.strip()
+        self.stage1_regex_pattern = self.stage1_regex_pattern.strip()
+        self.stage2_regex_pattern = self.stage2_regex_pattern.strip()
+        if self.corpus_shard_bytes <= 0:
+            raise ValueError("training.superbpe.corpus_shard_bytes must be positive.")
+        if self.engine not in {"upstream", "native"}:
+            raise ValueError("training.superbpe.engine must be one of: upstream, native.")
+        if not self.runtime_root:
+            raise ValueError("training.superbpe.runtime_root must be non-empty.")
+        if not self.native_manifest_path:
+            raise ValueError("training.superbpe.native_manifest_path must be non-empty.")
+        if not self.repo_url:
+            raise ValueError("training.superbpe.repo_url must be non-empty.")
+        if not self.repo_commit:
+            raise ValueError("training.superbpe.repo_commit must be non-empty.")
+        if not self.tokenizers_submodule_commit:
+            raise ValueError(
+                "training.superbpe.tokenizers_submodule_commit must be non-empty."
+            )
+        if not self.python_executable:
+            raise ValueError("training.superbpe.python_executable must be non-empty.")
+        if self.native_threads < 0:
+            raise ValueError("training.superbpe.native_threads must be zero or positive.")
+        if self.native_stage1_threads < 0:
+            raise ValueError(
+                "training.superbpe.native_stage1_threads must be zero or positive."
+            )
+        if self.native_stage2_threads < 0:
+            raise ValueError(
+                "training.superbpe.native_stage2_threads must be zero or positive."
+            )
+        if not self.stage1_regex_pattern:
+            raise ValueError("training.superbpe.stage1_regex_pattern must be non-empty.")
+        if not self.stage2_regex_pattern:
+            raise ValueError("training.superbpe.stage2_regex_pattern must be non-empty.")
+        if self.stage2_inherit_merge_pairs <= 0:
+            raise ValueError("training.superbpe.stage2_inherit_merge_pairs must be positive.")
+        if self.stage1_num_bytes < 0:
+            raise ValueError("training.superbpe.stage1_num_bytes must be zero or positive.")
+        if self.stage2_num_bytes < 0:
+            raise ValueError("training.superbpe.stage2_num_bytes must be zero or positive.")
+        if self.stage1_max_words_per_token < 0:
+            raise ValueError(
+                "training.superbpe.stage1_max_words_per_token must be zero or positive."
+            )
+        if self.stage2_max_words_per_token < 0:
+            raise ValueError(
+                "training.superbpe.stage2_max_words_per_token must be zero or positive."
+            )
+        if self.stage1_max_word_count_entries < 0:
+            raise ValueError(
+                "training.superbpe.stage1_max_word_count_entries must be zero or positive."
+            )
+        if self.stage2_max_word_count_entries < 0:
+            raise ValueError(
+                "training.superbpe.stage2_max_word_count_entries must be zero or positive."
+            )
+
+    @property
+    def resolved_native_stage1_threads(self) -> int:
+        return self.native_stage1_threads or self.native_threads
+
+    @property
+    def resolved_native_stage2_threads(self) -> int:
+        return self.native_stage2_threads or self.native_threads
+
+
+@dataclass
 class TrainingConfig:
+    backend: str = "bpeasy"
     vocab_size: int = 50_000
     max_token_length: int = 128
     regex_pattern: str = GPT4_REGEX_PATTERN
@@ -76,11 +195,17 @@ class TrainingConfig:
     bpeasy_batch_size: int = 256
     export_huggingface: bool = True
     export_tiktoken: bool = True
+    superbpe: SuperBPEConfig | dict[str, Any] = field(default_factory=SuperBPEConfig)
 
     def __post_init__(self) -> None:
+        self.backend = self.backend.strip().lower()
         self.regex_pattern = self.regex_pattern.strip()
         self.special_tokens = [str(token) for token in self.special_tokens]
         self.name = self.name.strip()
+        if isinstance(self.superbpe, dict):
+            self.superbpe = SuperBPEConfig(**self.superbpe)
+        if self.backend not in {"bpeasy", "superbpe"}:
+            raise ValueError("training.backend must be one of: bpeasy, superbpe.")
         if self.vocab_size <= 0:
             raise ValueError("training.vocab_size must be positive.")
         if self.max_token_length <= 0:

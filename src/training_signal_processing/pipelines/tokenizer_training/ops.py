@@ -284,16 +284,15 @@ class SamplerProgressReporter:
             unit="B",
             unit_scale=True,
             unit_divisor=1024,
-            desc="Parquet text -> BPEasy",
+            desc="Parquet text -> tokenizer",
             dynamic_ncols=True,
             mininterval=1.0,
             file=sys.stdout,
         )
         self._write(
-            "Progress tracks UTF-8 bytes yielded from R2 parquet into BPEasy. "
+            "Progress tracks UTF-8 bytes yielded from parquet into tokenizer training. "
             "max_sample_bytes is a streamed raw-text cap, not a RAM target; RSS can stay "
-            "far below raw bytes because BPEasy batches texts and deduplicates regex chunks "
-            "before building pair indexes."
+            "far below raw bytes when the backend batches text or builds compact counts."
         )
 
     def update(
@@ -310,27 +309,20 @@ class SamplerProgressReporter:
             return
         if self.progress is not None:
             self.progress.update(text_bytes)
-            self.progress.set_postfix_str(
-                self._status_text(
-                    source=source,
-                    sampled_rows=sampled_rows,
-                    sampled_bytes=sampled_bytes,
-                    peak_rss_mib=peak_rss_mib,
-                    source_counts=source_counts,
-                )
-            )
         now = time.monotonic()
         if now - self.last_emit_at >= self.interval_seconds:
             self.last_emit_at = now
+            status_text = self._status_text(
+                source=source,
+                sampled_rows=sampled_rows,
+                sampled_bytes=sampled_bytes,
+                peak_rss_mib=peak_rss_mib,
+                source_counts=source_counts,
+            )
+            if self.progress is not None:
+                self.progress.set_postfix_str(status_text)
             self._write(
-                "sampler "
-                + self._status_text(
-                    source=source,
-                    sampled_rows=sampled_rows,
-                    sampled_bytes=sampled_bytes,
-                    peak_rss_mib=peak_rss_mib,
-                    source_counts=source_counts,
-                )
+                "sampler " + status_text
             )
 
     def close(self, reason: str) -> None:
@@ -340,8 +332,8 @@ class SamplerProgressReporter:
             self.progress.close()
         self._write(
             f"Sampler stopped with {reason}. If the process keeps running after this line, "
-            "BPEasy is in Rust-side pretokenized-count merge/vocab construction, where this "
-            "Python sampler cannot emit more byte progress."
+            "the tokenizer backend is training from already-yielded text, where this Python "
+            "sampler cannot emit more byte progress."
         )
 
     def _status_text(

@@ -7,6 +7,8 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.import_linter_cache/
+target/
 
 # Local tooling state
 .omx/
@@ -14,11 +16,15 @@ __pycache__/
 .runtime/
 r2
 mlflow.db
-.cache/marker_output/
-.cache/marker_benchmark/
-.cache/marker_smoke_output/
+.cache/
 experiments/
 source/data
+
+# Local infrastructure state and secrets
+infra/credentials/
+infra/dstack/server/
+infra/.current-machine
+infra/current-machine
 
 # Editor and OS noise
 .DS_Store

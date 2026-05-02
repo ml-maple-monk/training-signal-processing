@@ -1,9 +1,10 @@
 # SuperBPE Second Pass Notes
 
-This repo currently treats upstream SuperBPE as the reference implementation. The
-runtime adapter in `src/training_signal_processing/pipelines/tokenizer_training/superbpe.py`
-materializes text shards, prepares the pinned upstream clone under `.runtime/superbpe`,
-then runs two upstream `train_tokenizer.py` passes.
+This repo treats upstream SuperBPE as the reference implementation. The runtime
+adapter in `src/training_signal_processing/pipelines/tokenizer_training/superbpe.py`
+materializes text shards, then dispatches either to the pinned upstream clone
+under `.runtime/superbpe` or to the native Rust runner controlled by
+`training.superbpe.engine`.
 
 ## Two-Pass Flow
 
@@ -66,22 +67,62 @@ during Stage 2, especially when the Stage 2 regex allows very long spans.
 
 ## Rewrite Direction
 
-Use upstream SuperBPE as the oracle until a native path passes exact tiny-corpus
-parity. The first native surface should live behind this repo's adapter and keep
-the same artifact and summary shape. Do not patch upstream first.
+Use upstream SuperBPE as the oracle and keep it available as the rollback engine.
+The native surface lives behind this repo's adapter and keeps the same artifact
+and summary shape.
 
-The bpeasy-style direction is:
+The native runner at `rust/superbpe_native` follows the bpeasy-style direction:
 
-- represent chunks as byte sequences instead of Unicode `String` symbols;
+- regex-batch corpus text and byte-level encode each split chunk;
 - dedupe chunks up front and carry counts beside each unique chunk;
 - initialize pair counts once;
 - update pair counts incrementally with merge deltas;
 - track pair-to-chunk locations so each merge touches only affected chunks;
 - avoid per-merge allocation churn by editing chunk storage in place.
 
+SuperBPE compatibility code is intentionally limited to the behavior bpeasy does
+not expose publicly: upstream-compatible initial vocabulary ordering, forced
+Stage 2 inherited merges, and deterministic artifact serialization.
+
+## OOM Safety
+
+The first native guard is the existing top-level `training.max_token_length`,
+which is now passed to the Rust runner as `--max-token-length`. New native merge
+candidates longer than that limit are skipped, so the sample config's value of
+32 bounds learned token length for both stages.
+
+This is only the first, naive guard. It reduces runaway token growth, but it does
+not by itself bound the memory used by Stage 2 preprocessing: the Rust runner
+still accumulates all unique byte-level regex chunks, then builds `Sentence`
+storage, pair counts, and pair-location sets from those chunks. The next OOM
+guards should cap or split unusually long Stage 2 chunks and add explicit
+structure/RSS limits that fail clearly before the process is killed.
+
 The optimization article also calls out regex preprocessing as the next bottleneck
 once merge training is incremental. For this pipeline, benchmark Stage 2 regex
 preprocessing separately before assuming all time is in the merge loop.
+
+Native Rust word-count parallelism is explicit config, not a hidden stage
+heuristic. Use CLI overrides such as
+`--set training.superbpe.native_stage1_threads=8` and
+`--set training.superbpe.native_stage2_threads=2` to tune the two passes
+independently. `training.superbpe.native_threads` remains a shared fallback for
+older configs; stage-specific values take precedence when set.
+
+Stage 2 also has a simple chunk-size guard before `word_counts` is built:
+`training.superbpe.stage2_max_words_per_token`. The sample config sets it to
+`4`, and the native runner receives that as `--max-words-per-token 4`. This does
+not change the merge-length guard; it only splits long no-whitespace-break
+pretokenized chunks into smaller counted pieces before the memory-heavy
+`word_counts`, `Sentence`, pair-count, and pair-position structures are built.
+
+The native runner also supports a greedy unique-chunk cap for the same ingestion
+phase: `training.superbpe.stage2_max_word_count_entries`. The sample config sets
+it to `10000000`. Once that many unique byte-level chunks have been admitted to
+`word_counts`, ingestion continues scanning the corpus and incrementing already
+admitted chunks, but brand-new chunks are ignored. This cap is intentionally
+online; post-hoc pruning would still allow the OOM-prone map and downstream
+sentence/pair structures to grow first.
 
 ## References
 

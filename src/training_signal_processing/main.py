@@ -1,65 +1,76 @@
 from __future__ import annotations
 
+import importlib
 import json
 from pathlib import Path
 
 import click
 
-from .core.models import OpRuntimeContext
-from .core.submission import (
-    R2ArtifactStore,
-    SshRemoteTransport,
-    SubmissionCoordinator,
-)
-from .core.utils import join_s3_key, read_jsonl_rows
-from .ops.registry import RegisteredOpRegistry
-from .pipelines.fineweb_unified.config import (
-    load_recipe_config as load_fineweb_unified_config,
-)
-from .pipelines.fineweb_unified.runtime import fineweb_unified_remote_job_cli
-from .pipelines.fineweb_unified.submission import FineWebUnifiedSubmissionAdapter
-from .pipelines.lid_metadata.config import (
-    load_recipe_config as load_lid_metadata_config,
-)
-from .pipelines.lid_metadata.runtime import lid_metadata_remote_job_cli
-from .pipelines.lid_metadata.submission import LidMetadataSubmissionAdapter
-from .pipelines.ocr.config import load_recipe_config
-from .pipelines.ocr.runtime import ocr_remote_job_cli
-from .pipelines.ocr.submission import OcrSubmissionAdapter
-from .pipelines.source_accounting.config import (
-    load_recipe_config as load_source_accounting_config,
-)
-from .pipelines.source_accounting.runtime import source_accounting_remote_job_cli
-from .pipelines.source_accounting.submission import SourceAccountingSubmissionAdapter
-from .pipelines.source_cleaning.config import (
-    load_recipe_config as load_source_cleaning_config,
-)
-from .pipelines.source_cleaning.runtime import source_cleaning_remote_job_cli
-from .pipelines.source_cleaning.submission import SourceCleaningSubmissionAdapter
 from .pipelines.tokenizer_training.config import (
     load_recipe_config as load_tokenizer_training_config,
 )
 from .pipelines.tokenizer_training.runtime import run_tokenizer_training
-from .pipelines.unified_data.config import (
-    load_recipe_config as load_unified_data_config,
-)
-from .pipelines.unified_data.runtime import unified_data_remote_job_cli
-from .pipelines.unified_data.submission import UnifiedDataSubmissionAdapter
 
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
 
 
-@click.group()
+class LazyCommandGroup(click.Group):
+    def __init__(
+        self,
+        *args: object,
+        lazy_subcommands: dict[str, str] | None = None,
+        **kwargs: object,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._lazy_subcommands = lazy_subcommands or {}
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        commands = set(super().list_commands(ctx))
+        commands.update(self._lazy_subcommands)
+        return sorted(commands)
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        command = super().get_command(ctx, cmd_name)
+        if command is not None:
+            return command
+        target = self._lazy_subcommands.get(cmd_name)
+        if target is None:
+            return None
+        module_name, attribute_name = target.split(":", 1)
+        module = importlib.import_module(module_name)
+        command = getattr(module, attribute_name)
+        self.add_command(command, name=cmd_name)
+        return command
+
+
+@click.group(
+    cls=LazyCommandGroup,
+    lazy_subcommands={
+        "ocr-remote-job": "training_signal_processing.pipelines.ocr.runtime:ocr_remote_job_cli",
+        "source-accounting-remote-job": (
+            "training_signal_processing.pipelines.source_accounting.runtime:"
+            "source_accounting_remote_job_cli"
+        ),
+        "lid-metadata-remote-job": (
+            "training_signal_processing.pipelines.lid_metadata.runtime:"
+            "lid_metadata_remote_job_cli"
+        ),
+        "source-cleaning-remote-job": (
+            "training_signal_processing.pipelines.source_cleaning.runtime:"
+            "source_cleaning_remote_job_cli"
+        ),
+        "unified-data-remote-job": (
+            "training_signal_processing.pipelines.unified_data.runtime:"
+            "unified_data_remote_job_cli"
+        ),
+        "fineweb-unified-remote-job": (
+            "training_signal_processing.pipelines.fineweb_unified.runtime:"
+            "fineweb_unified_remote_job_cli"
+        ),
+    },
+)
 def cli() -> None:
     """Remote OCR commands."""
-
-
-cli.add_command(ocr_remote_job_cli, name="ocr-remote-job")
-cli.add_command(source_accounting_remote_job_cli, name="source-accounting-remote-job")
-cli.add_command(lid_metadata_remote_job_cli, name="lid-metadata-remote-job")
-cli.add_command(source_cleaning_remote_job_cli, name="source-cleaning-remote-job")
-cli.add_command(unified_data_remote_job_cli, name="unified-data-remote-job")
-cli.add_command(fineweb_unified_remote_job_cli, name="fineweb-unified-remote-job")
 
 
 @cli.command("validate")
@@ -72,6 +83,9 @@ cli.add_command(fineweb_unified_remote_job_cli, name="fineweb-unified-remote-job
 )
 @click.option("--set", "overrides", multiple=True)
 def validate_command(config_paths: tuple[Path, ...], overrides: tuple[str, ...]) -> None:
+    from .ops.registry import RegisteredOpRegistry
+    from .pipelines.ocr.config import load_recipe_config
+
     try:
         base_path, overlay_paths = config_paths[0], config_paths[1:]
         config = load_recipe_config(
@@ -102,6 +116,11 @@ def source_accounting_validate_command(
     config_paths: tuple[Path, ...],
     overrides: tuple[str, ...],
 ) -> None:
+    from .ops.registry import RegisteredOpRegistry
+    from .pipelines.source_accounting.config import (
+        load_recipe_config as load_source_accounting_config,
+    )
+
     try:
         base_path, overlay_paths = config_paths[0], config_paths[1:]
         config = load_source_accounting_config(
@@ -134,6 +153,11 @@ def lid_metadata_validate_command(
     config_paths: tuple[Path, ...],
     overrides: tuple[str, ...],
 ) -> None:
+    from .ops.registry import RegisteredOpRegistry
+    from .pipelines.lid_metadata.config import (
+        load_recipe_config as load_lid_metadata_config,
+    )
+
     try:
         base_path, overlay_paths = config_paths[0], config_paths[1:]
         config = load_lid_metadata_config(
@@ -164,6 +188,11 @@ def source_cleaning_validate_command(
     config_paths: tuple[Path, ...],
     overrides: tuple[str, ...],
 ) -> None:
+    from .ops.registry import RegisteredOpRegistry
+    from .pipelines.source_cleaning.config import (
+        load_recipe_config as load_source_cleaning_config,
+    )
+
     try:
         base_path, overlay_paths = config_paths[0], config_paths[1:]
         config = load_source_cleaning_config(
@@ -194,6 +223,11 @@ def unified_data_validate_command(
     config_paths: tuple[Path, ...],
     overrides: tuple[str, ...],
 ) -> None:
+    from .ops.registry import RegisteredOpRegistry
+    from .pipelines.unified_data.config import (
+        load_recipe_config as load_unified_data_config,
+    )
+
     try:
         base_path, overlay_paths = config_paths[0], config_paths[1:]
         config = load_unified_data_config(
@@ -226,6 +260,11 @@ def fineweb_unified_validate_command(
     config_paths: tuple[Path, ...],
     overrides: tuple[str, ...],
 ) -> None:
+    from .ops.registry import RegisteredOpRegistry
+    from .pipelines.fineweb_unified.config import (
+        load_recipe_config as load_fineweb_unified_config,
+    )
+
     try:
         base_path, overlay_paths = config_paths[0], config_paths[1:]
         config = load_fineweb_unified_config(
@@ -268,9 +307,12 @@ def tokenizer_training_validate_command(
             f"Validated tokenizer training recipe: {' + '.join(str(p) for p in config_paths)}"
         )
         click.echo(f"Run name: {config.run_name}")
+        click.echo(f"Backend: {config.training.backend}")
         click.echo(f"Vocab size: {config.training.vocab_size}")
         click.echo(f"Declared sources: {len(config.input.sources)}")
         click.echo(f"Final parts prefix: {config.input.final_parts_prefix}")
+        if config.input.local_parquet_root:
+            click.echo(f"Local parquet root: {config.input.local_parquet_root}")
         click.echo(f"Output root: {config.output.root_dir}")
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
@@ -278,6 +320,8 @@ def tokenizer_training_validate_command(
 
 @cli.command("list-ops")
 def list_ops_command() -> None:
+    from .ops.registry import RegisteredOpRegistry
+
     try:
         registry = RegisteredOpRegistry()
         descriptions = registry.describe_registered_ops()
@@ -311,7 +355,10 @@ def test_op_command(
     batch_size: int | None,
     overrides: tuple[str, ...],
 ) -> None:
+    from .core.utils import read_jsonl_rows
+    from .ops.registry import RegisteredOpRegistry
     from .ops.testing import build_default_ray_op_test_harness
+    from .pipelines.ocr.config import load_recipe_config
 
     try:
         base_path, overlay_paths = config_paths[0], config_paths[1:]
@@ -712,6 +759,10 @@ def submit_remote_pipeline(
     resume_run_id: str | None,
     overlay_paths: tuple[Path, ...] = (),
 ) -> dict[str, object]:
+    from .core.submission import R2ArtifactStore, SshRemoteTransport, SubmissionCoordinator
+    from .pipelines.ocr.config import load_recipe_config
+    from .pipelines.ocr.submission import OcrSubmissionAdapter
+
     config = load_recipe_config(config_path, overrides, overlay_paths=overlay_paths)
     submission = SubmissionCoordinator(
         adapter=OcrSubmissionAdapter(
@@ -734,6 +785,12 @@ def submit_source_accounting_pipeline(
     resume_run_id: str | None,
     overlay_paths: tuple[Path, ...] = (),
 ) -> dict[str, object]:
+    from .core.submission import R2ArtifactStore, SshRemoteTransport, SubmissionCoordinator
+    from .pipelines.source_accounting.config import (
+        load_recipe_config as load_source_accounting_config,
+    )
+    from .pipelines.source_accounting.submission import SourceAccountingSubmissionAdapter
+
     config = load_source_accounting_config(config_path, overrides, overlay_paths=overlay_paths)
     submission = SubmissionCoordinator(
         adapter=SourceAccountingSubmissionAdapter(
@@ -755,6 +812,12 @@ def prepare_lid_metadata_dstack_run(
     resume_run_id: str | None,
     overlay_paths: tuple[Path, ...] = (),
 ) -> dict[str, object]:
+    from .core.submission import R2ArtifactStore
+    from .pipelines.lid_metadata.config import (
+        load_recipe_config as load_lid_metadata_config,
+    )
+    from .pipelines.lid_metadata.submission import LidMetadataSubmissionAdapter
+
     config = load_lid_metadata_config(config_path, overrides, overlay_paths=overlay_paths)
     artifact_store = R2ArtifactStore.from_config_file(config.r2)
     adapter = LidMetadataSubmissionAdapter(
@@ -790,6 +853,12 @@ def submit_lid_metadata_pipeline(
     resume_run_id: str | None,
     overlay_paths: tuple[Path, ...] = (),
 ) -> dict[str, object]:
+    from .core.submission import R2ArtifactStore, SshRemoteTransport, SubmissionCoordinator
+    from .pipelines.lid_metadata.config import (
+        load_recipe_config as load_lid_metadata_config,
+    )
+    from .pipelines.lid_metadata.submission import LidMetadataSubmissionAdapter
+
     config = load_lid_metadata_config(config_path, overrides, overlay_paths=overlay_paths)
     submission = SubmissionCoordinator(
         adapter=LidMetadataSubmissionAdapter(
@@ -812,6 +881,12 @@ def submit_source_cleaning_pipeline(
     resume_run_id: str | None,
     overlay_paths: tuple[Path, ...] = (),
 ) -> dict[str, object]:
+    from .core.submission import R2ArtifactStore, SshRemoteTransport, SubmissionCoordinator
+    from .pipelines.source_cleaning.config import (
+        load_recipe_config as load_source_cleaning_config,
+    )
+    from .pipelines.source_cleaning.submission import SourceCleaningSubmissionAdapter
+
     config = load_source_cleaning_config(config_path, overrides, overlay_paths=overlay_paths)
     submission = SubmissionCoordinator(
         adapter=SourceCleaningSubmissionAdapter(
@@ -834,6 +909,12 @@ def submit_unified_data_pipeline(
     resume_run_id: str | None,
     overlay_paths: tuple[Path, ...] = (),
 ) -> dict[str, object]:
+    from .core.submission import R2ArtifactStore, SshRemoteTransport, SubmissionCoordinator
+    from .pipelines.unified_data.config import (
+        load_recipe_config as load_unified_data_config,
+    )
+    from .pipelines.unified_data.submission import UnifiedDataSubmissionAdapter
+
     config = load_unified_data_config(config_path, overrides, overlay_paths=overlay_paths)
     submission = SubmissionCoordinator(
         adapter=UnifiedDataSubmissionAdapter(
@@ -856,6 +937,12 @@ def submit_fineweb_unified_pipeline(
     resume_run_id: str | None,
     overlay_paths: tuple[Path, ...] = (),
 ) -> dict[str, object]:
+    from .core.submission import R2ArtifactStore, SshRemoteTransport, SubmissionCoordinator
+    from .pipelines.fineweb_unified.config import (
+        load_recipe_config as load_fineweb_unified_config,
+    )
+    from .pipelines.fineweb_unified.submission import FineWebUnifiedSubmissionAdapter
+
     config = load_fineweb_unified_config(config_path, overrides, overlay_paths=overlay_paths)
     submission = SubmissionCoordinator(
         adapter=FineWebUnifiedSubmissionAdapter(
@@ -904,7 +991,11 @@ def explore_cleaned_command(
     launch(config_file=config_file, host=host, port=port, share=share)
 
 
-def build_op_runtime_context(config, op_name: str) -> OpRuntimeContext:  # type: ignore[no-untyped-def]
+def build_op_runtime_context(config, op_name: str):  # type: ignore[no-untyped-def]
+    from .core.models import OpRuntimeContext
+    from .core.submission import R2ArtifactStore
+    from .core.utils import join_s3_key
+
     artifact_store = R2ArtifactStore.from_config_file(config.r2)
     return OpRuntimeContext(
         config=config,

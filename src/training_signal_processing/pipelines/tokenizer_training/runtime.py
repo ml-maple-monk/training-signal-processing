@@ -20,6 +20,7 @@ from .ops import (
     save_tiktoken_vocab,
     train_bpeasy_tokenizer,
 )
+from .superbpe import execute_superbpe_training
 
 Trainer = Callable[..., Any]
 
@@ -32,14 +33,17 @@ class TokenizerTrainingRunner:
         run_id = self.config.output.run_id or utc_timestamp()
         run_dir = Path(self.config.output.root_dir) / run_id
         if dry_run:
-            return {
+            payload: dict[str, Any] = {
                 "mode": "dry_run",
                 "run_id": run_id,
                 "run_dir": str(run_dir),
+                "backend": self.config.training.backend,
                 "sources": list(self.config.input.sources),
                 "vocab_size": self.config.training.vocab_size,
+                "max_token_length": self.config.training.max_token_length,
                 "max_wall_seconds": self.config.budget.max_wall_seconds,
                 "max_memory_gib": self.config.budget.max_memory_gib,
+                "local_parquet_root": self.config.input.local_parquet_root,
                 "checkpoint_enabled": self.config.checkpoint.enabled,
                 "checkpoint_interval_seconds": (
                     self.config.checkpoint.export_interval_seconds
@@ -50,6 +54,56 @@ class TokenizerTrainingRunner:
                 "checkpoint_export_grace_seconds": self.config.checkpoint.export_grace_seconds,
                 "resume_from_dir": self.config.output.resume_from_dir,
             }
+            if self.config.training.backend == "superbpe":
+                payload["superbpe"] = {
+                    "engine": self.config.training.superbpe.engine,
+                    "corpus_shard_bytes": self.config.training.superbpe.corpus_shard_bytes,
+                    "runtime_root": self.config.training.superbpe.runtime_root,
+                    "native_manifest_path": (
+                        self.config.training.superbpe.native_manifest_path
+                    ),
+                    "native_threads": self.config.training.superbpe.native_threads,
+                    "native_stage1_threads": (
+                        self.config.training.superbpe.native_stage1_threads
+                    ),
+                    "native_stage2_threads": (
+                        self.config.training.superbpe.native_stage2_threads
+                    ),
+                    "resolved_native_stage1_threads": (
+                        self.config.training.superbpe.resolved_native_stage1_threads
+                    ),
+                    "resolved_native_stage2_threads": (
+                        self.config.training.superbpe.resolved_native_stage2_threads
+                    ),
+                    "repo_url": self.config.training.superbpe.repo_url,
+                    "repo_commit": self.config.training.superbpe.repo_commit,
+                    "tokenizers_submodule_commit": (
+                        self.config.training.superbpe.tokenizers_submodule_commit
+                    ),
+                    "stage2_inherit_merge_pairs": (
+                        self.config.training.superbpe.stage2_inherit_merge_pairs
+                    ),
+                    "stage1_num_bytes": self.config.training.superbpe.stage1_num_bytes,
+                    "stage2_num_bytes": self.config.training.superbpe.stage2_num_bytes,
+                    "stage1_max_words_per_token": (
+                        self.config.training.superbpe.stage1_max_words_per_token
+                    ),
+                    "stage2_max_words_per_token": (
+                        self.config.training.superbpe.stage2_max_words_per_token
+                    ),
+                    "stage1_max_word_count_entries": (
+                        self.config.training.superbpe.stage1_max_word_count_entries
+                    ),
+                    "stage2_max_word_count_entries": (
+                        self.config.training.superbpe.stage2_max_word_count_entries
+                    ),
+                }
+            return payload
+        if self.config.training.backend == "superbpe" and self.config.checkpoint.enabled:
+            raise ValueError(
+                "SuperBPE backend does not support checkpoint.enabled=true; "
+                "disable checkpoints for cumulative two-stage training."
+            )
         if self.config.checkpoint.enabled:
             return run_checkpointed_training(
                 config=self.config,
@@ -67,7 +121,10 @@ def run_training_with_timeout(
 ) -> dict[str, Any]:
     staging_dir = run_dir.with_name(f"{run_dir.name}.staging")
     if staging_dir.exists():
-        shutil.rmtree(staging_dir)
+        if config.training.backend == "superbpe":
+            print(f"Reusing existing SuperBPE staging directory: {staging_dir}", flush=True)
+        else:
+            shutil.rmtree(staging_dir)
     if run_dir.exists():
         raise ValueError(f"Tokenizer output directory already exists: {run_dir}")
     staging_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -80,7 +137,8 @@ def run_training_with_timeout(
         cursor_state=None,
     )
     if result.get("status") == "timeout":
-        shutil.rmtree(staging_dir, ignore_errors=True)
+        if config.training.backend != "superbpe":
+            shutil.rmtree(staging_dir, ignore_errors=True)
         run_dir.mkdir(parents=True, exist_ok=False)
         summary = build_failed_summary(
             config=config,
@@ -93,17 +151,27 @@ def run_training_with_timeout(
         write_summary(run_dir / "training_summary.json", summary)
         raise TimeoutError(summary["error_message"])
     if result.get("status") != "success":
-        shutil.rmtree(staging_dir, ignore_errors=True)
+        if config.training.backend != "superbpe":
+            shutil.rmtree(staging_dir, ignore_errors=True)
         message = str(result.get("error_message") or "Tokenizer training failed.")
         raise RuntimeError(message)
     staging_dir.rename(run_dir)
-    summary = dict(result["summary"])
-    summary["run_dir"] = str(run_dir)
-    summary["artifacts"] = final_artifact_payload(
-        run_dir=run_dir,
-        export_huggingface=config.training.export_huggingface,
-        export_tiktoken=config.training.export_tiktoken,
+    summary = replace_path_prefix(
+        replace_path_prefix(
+            dict(result["summary"]),
+            old_prefix=str(staging_dir.resolve()),
+            new_prefix=str(run_dir.resolve()),
+        ),
+        old_prefix=str(staging_dir),
+        new_prefix=str(run_dir),
     )
+    summary["run_dir"] = str(run_dir)
+    if config.training.backend == "bpeasy":
+        summary["artifacts"] = final_artifact_payload(
+            run_dir=run_dir,
+            export_huggingface=config.training.export_huggingface,
+            export_tiktoken=config.training.export_tiktoken,
+        )
     write_summary(run_dir / "training_summary.json", summary)
     return summary
 
@@ -325,6 +393,20 @@ def execute_training(
     budget: BudgetConfig | None = None,
     cursor_state: dict[str, Any] | SamplerCursorState | None = None,
 ) -> dict[str, Any]:
+    if config.training.backend == "superbpe":
+        return execute_superbpe_training(
+            config=config,
+            run_id=run_id,
+            run_dir=run_dir,
+            object_store=object_store,
+            budget=budget,
+            cursor_state=(
+                cursor_state.to_dict()
+                if isinstance(cursor_state, SamplerCursorState)
+                else cursor_state
+            ),
+        )
+
     run_dir.mkdir(parents=True, exist_ok=True)
     paths = artifact_paths(run_dir)
     sampler = RoundRobinTextSampler(
@@ -463,6 +545,8 @@ def _training_worker(
 
 def build_training_object_store(config: RecipeConfig) -> ObjectStore:
     local_root = os.environ.get("TOKENIZER_TRAINING_LOCAL_PARQUET_ROOT", "").strip()
+    if not local_root:
+        local_root = config.input.local_parquet_root
     if local_root:
         return LocalParquetObjectStore(Path(local_root), bucket=config.r2.bucket)
     return R2ObjectStore.from_config_file(config.r2)
@@ -486,6 +570,7 @@ def build_success_summary(
         "run_id": run_id,
         "run_name": config.run_name,
         "run_dir": str(run_dir),
+        "backend": config.training.backend,
         "vocab_size": config.training.vocab_size,
         "max_token_length": config.training.max_token_length,
         "bpeasy_batch_size": config.training.bpeasy_batch_size,
@@ -519,6 +604,7 @@ def build_failed_summary(
         "run_id": run_id,
         "run_name": config.run_name,
         "run_dir": str(run_dir),
+        "backend": config.training.backend,
         "sources": list(config.input.sources),
         "sampled_rows": 0,
         "sampled_bytes": 0,
@@ -558,6 +644,7 @@ def build_checkpointed_summary(
         "run_id": run_id,
         "run_name": config.run_name,
         "run_dir": str(run_dir),
+        "backend": config.training.backend,
         "vocab_size": config.training.vocab_size,
         "max_token_length": config.training.max_token_length,
         "bpeasy_batch_size": config.training.bpeasy_batch_size,
@@ -680,3 +767,23 @@ def read_summary(path: Path) -> dict[str, Any]:
 
 def run_tokenizer_training(config: RecipeConfig, *, dry_run: bool = False) -> dict[str, Any]:
     return TokenizerTrainingRunner(config).run(dry_run=dry_run)
+
+
+def replace_path_prefix(value: Any, *, old_prefix: str, new_prefix: str) -> Any:
+    if isinstance(value, str):
+        if value == old_prefix:
+            return new_prefix
+        if value.startswith(old_prefix + os.sep):
+            return new_prefix + value[len(old_prefix):]
+        return value
+    if isinstance(value, list):
+        return [
+            replace_path_prefix(item, old_prefix=old_prefix, new_prefix=new_prefix)
+            for item in value
+        ]
+    if isinstance(value, dict):
+        return {
+            key: replace_path_prefix(item, old_prefix=old_prefix, new_prefix=new_prefix)
+            for key, item in value.items()
+        }
+    return value

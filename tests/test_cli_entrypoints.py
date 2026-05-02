@@ -4,6 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -29,7 +30,7 @@ def prepare_sample_ocr_run(tmp_path: Path):
 
 
 def test_main_cli_registers_ocr_remote_job_command() -> None:
-    assert "ocr-remote-job" in cli.commands
+    assert "ocr-remote-job" in cli.list_commands(click.Context(cli))
 
 
 def test_main_cli_registers_tokenizer_training_commands() -> None:
@@ -68,6 +69,48 @@ def test_tokenizer_training_run_dry_run_outputs_plan() -> None:
     assert '"mode": "dry_run"' in result.output
     assert '"run_id": "test-tokenizer-dry-run"' in result.output
     assert '"vocab_size": 50000' in result.output
+
+
+def test_superbpe_tokenizer_training_validate_and_dry_run_outputs_backend() -> None:
+    validate_result = CliRunner().invoke(
+        cli,
+        [
+            "tokenizer-training-validate",
+            "--config",
+            "config/tokenizer_training.superbpe_balanced_50k.sample.yaml",
+        ],
+    )
+    assert validate_result.exit_code == 0, validate_result.output
+    assert "Backend: superbpe" in validate_result.output
+
+    run_result = CliRunner().invoke(
+        cli,
+        [
+            "tokenizer-training-run",
+            "--config",
+            "config/tokenizer_training.superbpe_balanced_50k.sample.yaml",
+            "--dry-run",
+            "--set",
+            "output.run_id=test-superbpe-dry-run",
+            "--set",
+            "training.superbpe.native_stage1_threads=7",
+            "--set",
+            "training.superbpe.native_stage2_threads=3",
+            "--set",
+            "training.superbpe.stage2_max_words_per_token=4",
+        ],
+    )
+    assert run_result.exit_code == 0, run_result.output
+    assert '"backend": "superbpe"' in run_result.output
+    assert '"engine": "native"' in run_result.output
+    assert '"native_manifest_path": "rust/superbpe_native/Cargo.toml"' in run_result.output
+    assert '"native_stage1_threads": 7' in run_result.output
+    assert '"native_stage2_threads": 3' in run_result.output
+    assert '"resolved_native_stage1_threads": 7' in run_result.output
+    assert '"resolved_native_stage2_threads": 3' in run_result.output
+    assert '"stage2_max_words_per_token": 4' in run_result.output
+    assert '"stage2_max_word_count_entries": 10000000' in run_result.output
+    assert '"corpus_shard_bytes": 536870912' in run_result.output
 
 
 def test_ocr_submission_uses_package_cli_entrypoint(

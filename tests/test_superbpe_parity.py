@@ -20,9 +20,10 @@ SUPERBPE_ORACLE_VENV = SUPERBPE_ORACLE_ROOT / "venv"
 
 def test_superbpe_stage_runner_matches_upstream_oracle_artifacts(tmp_path: Path) -> None:
     oracle = require_local_superbpe_oracle()
+    native_runtime = require_local_native_superbpe_runner(oracle)
     corpus_dir = tmp_path / "corpus"
     write_tiny_superbpe_corpus(corpus_dir)
-    config = tiny_superbpe_config(tmp_path)
+    oracle_config = tiny_superbpe_config(tmp_path, engine="upstream")
 
     oracle_stage2_dir = run_upstream_superbpe_two_pass(
         repo_dir=oracle["repo_dir"],
@@ -30,25 +31,48 @@ def test_superbpe_stage_runner_matches_upstream_oracle_artifacts(tmp_path: Path)
         env=oracle["env"],
         corpus_dir=corpus_dir,
         output_root=tmp_path / "oracle",
-        config=config,
+        config=oracle_config,
     )
-    candidate_result = run_superbpe_stages(
-        config=config,
+    upstream_result = run_superbpe_stages(
+        config=oracle_config,
         corpus_dir=corpus_dir,
-        run_dir=tmp_path / "candidate",
+        run_dir=tmp_path / "candidate-upstream",
         runtime_paths=oracle,
     )
-    candidate_stage2_dir = Path(candidate_result["stage2_dir"])
+    assert_stage2_artifacts_match_oracle(
+        expected_dir=oracle_stage2_dir,
+        actual_dir=Path(upstream_result["stage2_dir"]),
+        oracle=oracle,
+    )
+
+    native_config = tiny_superbpe_config(tmp_path, engine="native")
+    native_result = run_superbpe_stages(
+        config=native_config,
+        corpus_dir=corpus_dir,
+        run_dir=tmp_path / "candidate-native",
+        runtime_paths=native_runtime,
+    )
+    assert_stage2_artifacts_match_oracle(
+        expected_dir=oracle_stage2_dir,
+        actual_dir=Path(native_result["stage2_dir"]),
+        oracle=oracle,
+    )
+
+
+def assert_stage2_artifacts_match_oracle(
+    *,
+    expected_dir: Path,
+    actual_dir: Path,
+    oracle: dict[str, Any],
+) -> None:
 
     assert_text_artifacts_match(
-        oracle_stage2_dir,
-        candidate_stage2_dir,
+        expected_dir,
+        actual_dir,
         file_names=["initial_merges.txt", "merges.txt", "vocab.json"],
     )
-    assert read_json(oracle_stage2_dir / "tokenizer.json") == read_json(
-        candidate_stage2_dir / "tokenizer.json"
-    )
-    assert stable_stage2_meta(oracle_stage2_dir) == stable_stage2_meta(candidate_stage2_dir)
+    assert read_json(expected_dir / "tokenizer.json") == read_json(actual_dir / "tokenizer.json")
+    assert stable_stage2_meta(expected_dir) == stable_stage2_meta(actual_dir)
 
     probes = [
         "alpha beta alphabeta",
@@ -58,13 +82,13 @@ def test_superbpe_stage_runner_matches_upstream_oracle_artifacts(tmp_path: Path)
     assert encode_probes(
         python_path=oracle["python"],
         repo_dir=oracle["repo_dir"],
-        tokenizer_path=oracle_stage2_dir / "tokenizer.json",
+        tokenizer_path=expected_dir / "tokenizer.json",
         probes=probes,
         env=oracle["env"],
     ) == encode_probes(
         python_path=oracle["python"],
         repo_dir=oracle["repo_dir"],
-        tokenizer_path=candidate_stage2_dir / "tokenizer.json",
+        tokenizer_path=actual_dir / "tokenizer.json",
         probes=probes,
         env=oracle["env"],
     )
@@ -118,6 +142,43 @@ def require_local_superbpe_oracle() -> dict[str, Any]:
     }
 
 
+def require_local_native_superbpe_runner(oracle: dict[str, Any]) -> dict[str, Any]:
+    manifest_path = Path("rust/superbpe_native/Cargo.toml").resolve()
+    cargo_check = subprocess.run(
+        [
+            "cargo",
+            "metadata",
+            "--manifest-path",
+            str(manifest_path),
+            "--locked",
+            "--offline",
+            "--no-deps",
+            "--format-version",
+            "1",
+        ],
+        cwd=Path.cwd(),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if cargo_check.returncode != 0:
+        pytest.skip(
+            "Native SuperBPE cargo dependencies are not available offline; "
+            f"cargo metadata failed:\n{cargo_check.stderr.strip()}"
+        )
+    env = dict(oracle["env"])
+    env["CARGO_NET_OFFLINE"] = "true"
+    return {
+        "runtime_root": str(Path.cwd() / ".runtime/superbpe-native"),
+        "repo_dir": "",
+        "venv_dir": "",
+        "python": "",
+        "env": env,
+        "native_manifest_path": str(manifest_path),
+    }
+
+
 def write_tiny_superbpe_corpus(corpus_dir: Path) -> None:
     corpus_dir.mkdir(parents=True, exist_ok=True)
     (corpus_dir / "corpus-000001.txt").write_text(
@@ -137,12 +198,15 @@ def write_tiny_superbpe_corpus(corpus_dir: Path) -> None:
     )
 
 
-def tiny_superbpe_config(tmp_path: Path):
+def tiny_superbpe_config(tmp_path: Path, *, engine: str):
     config = load_recipe_config(
         Path("config/tokenizer_training.superbpe_balanced_50k.sample.yaml"),
         overrides=[
+            f"training.superbpe.engine={engine}",
             "training.vocab_size=280",
+            "training.max_token_length=128",
             "training.superbpe.stage2_inherit_merge_pairs=7",
+            "training.superbpe.stage2_max_words_per_token=4",
             f"output.root_dir={tmp_path / 'tokenizers'}",
         ],
     )
