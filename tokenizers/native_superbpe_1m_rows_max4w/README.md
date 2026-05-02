@@ -7,6 +7,7 @@ This directory contains the current best tokenizer artifact for this repo.
 - Training shape: native SuperBPE, `1000000` best-effort interleaved rows,
   Stage 2 ingestion cap `stage2_max_words_per_token = 4`
 - Vocab size: `50000`
+- Added special tokens: Qwen3 special-token set (`14` tokens)
 - Max token length: `32`
 - Measured fertility: `1.294` tokens per whitespace word
 - Token reduction vs `local_bpeasy_balanced_1to1`: `7.94%`
