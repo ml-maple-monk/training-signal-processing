@@ -1,0 +1,72 @@
+{
+  "aggregate": {
+    "bytes_per_token": 5.401,
+    "characters_per_token": 5.38,
+    "documents": 30650,
+    "encoded_tokens": 22603105,
+    "fertility_tokens_per_word": 1.294,
+    "roundtrip_failures": 1,
+    "roundtrip_ok": 30649,
+    "tokens_per_1000_chars": 185.891,
+    "utf8_bytes": 122083251,
+    "words_whitespace": 17464261
+  },
+  "per_source": {
+    "books-ocr": {
+      "documents": 330,
+      "encoded_tokens": 6796032,
+      "fertility_tokens_per_word": 1.442,
+      "utf8_bytes": 33641582,
+      "words_whitespace": 4711340
+    },
+    "cari": {
+      "documents": 5000,
+      "encoded_tokens": 374889,
+      "fertility_tokens_per_word": 1.479,
+      "utf8_bytes": 1707778,
+      "words_whitespace": 253497
+    },
+    "fineweb": {
+      "documents": 5000,
+      "encoded_tokens": 3375852,
+      "fertility_tokens_per_word": 1.19,
+      "utf8_bytes": 17135292,
+      "words_whitespace": 2836499
+    },
+    "hplt-indonesia": {
+      "documents": 3655,
+      "encoded_tokens": 5592178,
+      "fertility_tokens_per_word": 1.186,
+      "utf8_bytes": 33705322,
+      "words_whitespace": 4714412
+    },
+    "hplt-malay": {
+      "documents": 1665,
+      "encoded_tokens": 5952227,
+      "fertility_tokens_per_word": 1.308,
+      "utf8_bytes": 33558750,
+      "words_whitespace": 4551574
+    },
+    "lowyat": {
+      "documents": 5000,
+      "encoded_tokens": 193805,
+      "fertility_tokens_per_word": 1.281,
+      "utf8_bytes": 893421,
+      "words_whitespace": 151248
+    },
+    "reddit-bolehland": {
+      "documents": 5000,
+      "encoded_tokens": 140982,
+      "fertility_tokens_per_word": 1.155,
+      "utf8_bytes": 673547,
+      "words_whitespace": 122018
+    },
+    "reddit-indonesia": {
+      "documents": 5000,
+      "encoded_tokens": 177140,
+      "fertility_tokens_per_word": 1.432,
+      "utf8_bytes": 767559,
+      "words_whitespace": 123673
+    }
+  }
+}

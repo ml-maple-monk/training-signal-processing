@@ -23,3 +23,9 @@ ids = tokenizer.encode("Saya pergi ke pasar untuk membeli ikan dan sayur.").ids
 ```
 
 See `TOKENIZER_DOCS.md` for performance tables and caveats.
+
+Reproduce the published fertility numbers with:
+
+```bash
+uv run --group tokenizer_training python analysis/tokenizer/reproduce_native_superbpe_1m_rows_max4w.py
+```

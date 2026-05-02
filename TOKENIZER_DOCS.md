@@ -84,6 +84,10 @@ the earlier 100k-row SuperBPE run, it uses `3.77%` fewer tokens (`22603105` vs
 
 ## Evaluation Artifacts
 
+- Reproduction command:
+  `uv run --group tokenizer_training python analysis/tokenizer/reproduce_native_superbpe_1m_rows_max4w.py`
+- Expected metrics checked by the reproduction command:
+  `analysis/tokenizer/native_superbpe_1m_rows_max4w_expected.json`
 - SuperBPE evaluation JSON: `.runtime/tokenizers/experiments/superbpe-interleaved-1m-oneline-besteffort-20260502T215607Z/superbpe_tokenizer_evaluation.json`
 - SuperBPE evaluation Markdown: `.runtime/tokenizers/experiments/superbpe-interleaved-1m-oneline-besteffort-20260502T215607Z/superbpe_tokenizer_evaluation.md`
 - BPEasy baseline evaluation JSON: `.runtime/tokenizers/experiments/20260501T213354Z-balanced-fineweb-1to1-full-b1024-t16/tokenizer_evaluation.json`

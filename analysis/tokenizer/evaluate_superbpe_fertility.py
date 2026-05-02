@@ -14,6 +14,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import yaml
+
 from tokenizers import Tokenizer
 
 WORD_PATTERN = re.compile(r"\S+")
@@ -293,11 +294,17 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         source: metrics[source].finalize()
         for source in sources
     }
+    training_summary = {}
+    if args.training_summary is not None:
+        training_summary = json.loads(args.training_summary.read_text(encoding="utf-8"))
+
     result = {
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "run_id": args.run_id,
         "tokenizer_path": str(args.tokenizer_json),
-        "training_summary_path": str(args.training_summary),
+        "training_summary_path": (
+            str(args.training_summary) if args.training_summary is not None else None
+        ),
         "cache_root": str(args.cache_root),
         "evaluation_seconds": time.monotonic() - started,
         "sample_policy": {
@@ -312,7 +319,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "word_definition": r"Python regex \S+ over decoded Unicode text",
             "fertility_definition": "encoded SuperBPE tokens / whitespace words",
         },
-        "training_summary": json.loads(args.training_summary.read_text(encoding="utf-8")),
+        "training_summary": training_summary,
         "aggregate_metrics": aggregate.finalize(),
         "per_source_metrics": per_source,
     }
@@ -344,7 +351,7 @@ def format_table(result: dict[str, Any]) -> str:
 def write_markdown(result: dict[str, Any], path: Path) -> None:
     aggregate = result["aggregate_metrics"]
     training = result["training_summary"]
-    superbpe = training["superbpe"]
+    superbpe = training.get("superbpe", {})
     text = f"""# SuperBPE Fertility Evaluation
 
 Run id: `{result["run_id"]}`
@@ -357,15 +364,15 @@ Run id: `{result["run_id"]}`
 
 ## Training Snapshot
 
-- Training rows: `{training["sampled_rows"]}`
-- Training UTF-8 bytes: `{training["sampled_bytes"]}`
-- Stop reason: `{training["stop_reason"]}`
-- Vocab size: `{training["vocab_size"]}`
-- Max token length: `{training["max_token_length"]}`
-- Stage 2 inherited merges: `{superbpe["stage2_inherit_merge_pairs"]}`
-- Stage 2 max words per token: `{superbpe["stage2_max_words_per_token"]}`
-- Stage 2 ingest seconds: `{training["stage2_ingest_elapsed_seconds"]:.3f}`
-- Stage 2 train seconds: `{training["stage2_train_elapsed_seconds"]:.3f}`
+- Training rows: `{training.get("sampled_rows", "unknown")}`
+- Training UTF-8 bytes: `{training.get("sampled_bytes", "unknown")}`
+- Stop reason: `{training.get("stop_reason", "unknown")}`
+- Vocab size: `{training.get("vocab_size", "unknown")}`
+- Max token length: `{training.get("max_token_length", "unknown")}`
+- Stage 2 inherited merges: `{superbpe.get("stage2_inherit_merge_pairs", "unknown")}`
+- Stage 2 max words per token: `{superbpe.get("stage2_max_words_per_token", "unknown")}`
+- Stage 2 ingest seconds: `{format_optional_float(training.get("stage2_ingest_elapsed_seconds"))}`
+- Stage 2 train seconds: `{format_optional_float(training.get("stage2_train_elapsed_seconds"))}`
 
 ## Fertility Metrics
 
@@ -395,11 +402,17 @@ Aggregate sample metrics:
     path.write_text(text, encoding="utf-8")
 
 
+def format_optional_float(value: object) -> str:
+    if isinstance(value, int | float):
+        return f"{value:.3f}"
+    return "unknown"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--tokenizer-json", type=Path, required=True)
-    parser.add_argument("--training-summary", type=Path, required=True)
+    parser.add_argument("--training-summary", type=Path)
     parser.add_argument(
         "--config",
         type=Path,
