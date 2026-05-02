@@ -8,6 +8,7 @@ Use `native_superbpe_1m_rows_max4w` as the current best tokenizer.
 - Source run id: `superbpe-interleaved-1m-oneline-besteffort-20260502T215607Z`
 - Training shape: native SuperBPE, `1000000` best-effort interleaved rows, Stage 2 ingestion cap `stage2_max_words_per_token = 4`
 - Vocab size: `50000`
+- Added special tokens: Qwen3 special-token set (`14` tokens, ids `50000`-`50013`)
 - Max token length: `32`
 
 Tracked comparison tokenizer artifacts:
@@ -36,6 +37,28 @@ For byte-exact decoding, use the byte-level decoder helper in
 `Tokenizer.decode()` exposes GPT-2 byte-level space markers for this exported
 tokenizer.
 
+## Added Special Tokens
+
+The tokenizer keeps the learned `50000`-token SuperBPE vocabulary intact and
+appends Qwen3-compatible special tokens after the base vocabulary:
+
+| id | token |
+| ---: | --- |
+| 50000 | `<|endoftext|>` |
+| 50001 | `<|im_start|>` |
+| 50002 | `<|im_end|>` |
+| 50003 | `<|object_ref_start|>` |
+| 50004 | `<|object_ref_end|>` |
+| 50005 | `<|box_start|>` |
+| 50006 | `<|box_end|>` |
+| 50007 | `<|quad_start|>` |
+| 50008 | `<|quad_end|>` |
+| 50009 | `<|vision_start|>` |
+| 50010 | `<|vision_end|>` |
+| 50011 | `<|vision_pad|>` |
+| 50012 | `<|image_pad|>` |
+| 50013 | `<|video_pad|>` |
+
 ## Evaluation Policy
 
 Fertility means `encoded tokens / whitespace words`, where whitespace words are
@@ -48,14 +71,22 @@ tokenizer comparisons:
 - up to `33554432` UTF-8 bytes per source
 - FineWeb files sampled evenly across `2098` cached FineWeb parquet files
 
-## Rerun The Fertility Experiment
+## Reproduce The Fertility Numbers
 
-The reproduction command re-encodes the same bounded local parquet sample with
-the tracked SuperBPE tokenizer, writes fresh evaluation JSON/Markdown under
-`.runtime/tokenizers/experiments/native_superbpe_1m_rows_max4w/`, and checks the
-result against `analysis/tokenizer/native_superbpe_1m_rows_max4w_expected.json`.
-The last reproduced JSON and Markdown snapshot is checked into the repo under
+The docs are backed by a checked-in evaluation snapshot:
 `analysis/tokenizer/experiments/native_superbpe_1m_rows_max4w/`.
+
+Fast verification checks that tracked snapshot against the expected metrics:
+
+```bash
+uv run --group tokenizer_training python analysis/tokenizer/reproduce_native_superbpe_1m_rows_max4w.py \
+  --input-json analysis/tokenizer/experiments/native_superbpe_1m_rows_max4w/superbpe_tokenizer_evaluation.json
+```
+
+Full reproduction re-encodes the same bounded local parquet sample with the
+tracked SuperBPE tokenizer, writes fresh evaluation JSON/Markdown under
+`.runtime/tokenizers/experiments/native_superbpe_1m_rows_max4w/`, and checks the
+result against `analysis/tokenizer/native_superbpe_1m_rows_max4w_expected.json`:
 
 ```bash
 uv run --group tokenizer_training python analysis/tokenizer/reproduce_native_superbpe_1m_rows_max4w.py
@@ -63,14 +94,6 @@ uv run --group tokenizer_training python analysis/tokenizer/reproduce_native_sup
 
 Prerequisite: the local parquet cache must exist at
 `.runtime/tokenizers/parquet-cache/20260501T211207Z-rclone-balanced-fineweb-1to1`.
-
-To verify the published expected metrics against an already generated evaluation
-JSON without rereading the parquet cache:
-
-```bash
-uv run --group tokenizer_training python analysis/tokenizer/reproduce_native_superbpe_1m_rows_max4w.py \
-  --input-json analysis/tokenizer/experiments/native_superbpe_1m_rows_max4w/superbpe_tokenizer_evaluation.json
-```
 
 ## Aggregate Performance
 
@@ -115,17 +138,21 @@ the earlier 100k-row SuperBPE run, it uses `3.77%` fewer tokens (`22603105` vs
 | `reddit-indonesia` | 1.432 | 1.488 | 1.451 | 1.859 | 1.867 |
 | `fineweb` | 1.190 | 1.327 | 1.378 | 1.295 | 1.321 |
 
-## Evaluation Artifacts
+## Tracked Artifacts
 
-- Reproduction command:
-  `uv run --group tokenizer_training python analysis/tokenizer/reproduce_native_superbpe_1m_rows_max4w.py`
+- SuperBPE tokenizer: `tokenizers/native_superbpe_1m_rows_max4w/tokenizer.json`
+- BPEasy baseline tokenizer: `tokenizers/local_bpeasy_balanced_1to1/tokenizer.json`
+- Previous BPEasy tokenizer: `tokenizers/local_bpeasy_previous_40g_cache/tokenizer.json`
+- SuperBPE evaluation JSON: `analysis/tokenizer/experiments/native_superbpe_1m_rows_max4w/superbpe_tokenizer_evaluation.json`
+- SuperBPE evaluation Markdown: `analysis/tokenizer/experiments/native_superbpe_1m_rows_max4w/superbpe_tokenizer_evaluation.md`
 - Expected metrics checked by the reproduction command:
   `analysis/tokenizer/native_superbpe_1m_rows_max4w_expected.json`
-- Tracked SuperBPE tokenizer: `tokenizers/native_superbpe_1m_rows_max4w/tokenizer.json`
-- Tracked BPEasy baseline tokenizer: `tokenizers/local_bpeasy_balanced_1to1/tokenizer.json`
-- Tracked previous BPEasy tokenizer: `tokenizers/local_bpeasy_previous_40g_cache/tokenizer.json`
-- Tracked SuperBPE evaluation JSON: `analysis/tokenizer/experiments/native_superbpe_1m_rows_max4w/superbpe_tokenizer_evaluation.json`
-- Tracked SuperBPE evaluation Markdown: `analysis/tokenizer/experiments/native_superbpe_1m_rows_max4w/superbpe_tokenizer_evaluation.md`
+
+## Runtime-Only Source Artifacts
+
+These files were used to derive the comparison rows, but remain under ignored
+runtime storage:
+
 - BPEasy baseline evaluation JSON: `.runtime/tokenizers/experiments/20260501T213354Z-balanced-fineweb-1to1-full-b1024-t16/tokenizer_evaluation.json`
 - Full external-tokenizer comparison JSON: `.runtime/tokenizers/experiments/20260501T213354Z-balanced-fineweb-1to1-full-b1024-t16/tokenizer_fertility_comparison.json`
 
