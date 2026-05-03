@@ -67,6 +67,10 @@ class LazyCommandGroup(click.Group):
             "training_signal_processing.pipelines.fineweb_unified.runtime:"
             "fineweb_unified_remote_job_cli"
         ),
+        "dataset-tokenization-remote-job": (
+            "training_signal_processing.pipelines.dataset_tokenization.runtime:"
+            "dataset_tokenization_remote_job_cli"
+        ),
     },
 )
 def cli() -> None:
@@ -277,6 +281,48 @@ def fineweb_unified_validate_command(
         click.echo(f"Run name: {config.run_name}")
         click.echo(f"Dataset: {config.input.dataset_name}")
         click.echo(f"Byte cap: {config.export.byte_cap}")
+        click.echo(f"Output prefix: {config.r2.output_prefix}")
+        click.echo(f"Resolved pipeline: {', '.join(pipeline.names)}")
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.command("dataset-tokenization-validate")
+@click.option(
+    "--config",
+    "config_paths",
+    required=True,
+    multiple=True,
+    type=click.Path(path_type=Path),
+)
+@click.option("--set", "overrides", multiple=True)
+def dataset_tokenization_validate_command(
+    config_paths: tuple[Path, ...],
+    overrides: tuple[str, ...],
+) -> None:
+    from .ops.registry import RegisteredOpRegistry
+    from .pipelines.dataset_tokenization import ops as _ops  # noqa: F401
+    from .pipelines.dataset_tokenization.config import (
+        load_recipe_config as load_dataset_tokenization_config,
+    )
+
+    try:
+        base_path, overlay_paths = config_paths[0], config_paths[1:]
+        config = load_dataset_tokenization_config(
+            base_path,
+            list(overrides),
+            overlay_paths=overlay_paths,
+        )
+        pipeline = RegisteredOpRegistry().resolve_pipeline(config.ops)
+        click.echo(
+            "Validated dataset tokenization recipe: "
+            f"{' + '.join(str(p) for p in config_paths)}"
+        )
+        click.echo(f"Run name: {config.run_name}")
+        click.echo(f"Tokenizer: {config.tokenizer.name}")
+        click.echo(f"Tokenizer JSON: {config.tokenizer.json_path}")
+        click.echo(f"Final parts prefix: {config.input.final_parts_prefix}")
+        click.echo(f"FineWeb run root: {config.input.fineweb_run_root}")
         click.echo(f"Output prefix: {config.r2.output_prefix}")
         click.echo(f"Resolved pipeline: {', '.join(pipeline.names)}")
     except Exception as exc:
@@ -546,6 +592,34 @@ def fineweb_unified_run_command(
         raise click.ClickException(str(exc)) from exc
 
 
+@cli.command("dataset-tokenization-run")
+@click.option(
+    "--config",
+    "config_paths",
+    required=True,
+    multiple=True,
+    type=click.Path(path_type=Path),
+)
+@click.option("--dry-run", is_flag=True, default=False)
+@click.option("--set", "overrides", multiple=True)
+def dataset_tokenization_run_command(
+    config_paths: tuple[Path, ...],
+    dry_run: bool,
+    overrides: tuple[str, ...],
+) -> None:
+    try:
+        result = submit_dataset_tokenization_pipeline(
+            config_path=config_paths[0],
+            overlay_paths=config_paths[1:],
+            overrides=list(overrides),
+            dry_run=dry_run,
+            resume_run_id=None,
+        )
+        click.echo(json.dumps(result, indent=2, sort_keys=True))
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
 @cli.command("tokenizer-training-run")
 @click.option(
     "--config",
@@ -713,6 +787,36 @@ def fineweb_unified_resume_command(
 ) -> None:
     try:
         result = submit_fineweb_unified_pipeline(
+            config_path=config_paths[0],
+            overlay_paths=config_paths[1:],
+            overrides=list(overrides),
+            dry_run=dry_run,
+            resume_run_id=run_id,
+        )
+        click.echo(json.dumps(result, indent=2, sort_keys=True))
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.command("dataset-tokenization-resume")
+@click.option(
+    "--config",
+    "config_paths",
+    required=True,
+    multiple=True,
+    type=click.Path(path_type=Path),
+)
+@click.option("--dry-run", is_flag=True, default=False)
+@click.option("--run-id", required=True)
+@click.option("--set", "overrides", multiple=True)
+def dataset_tokenization_resume_command(
+    config_paths: tuple[Path, ...],
+    dry_run: bool,
+    run_id: str,
+    overrides: tuple[str, ...],
+) -> None:
+    try:
+        result = submit_dataset_tokenization_pipeline(
             config_path=config_paths[0],
             overlay_paths=config_paths[1:],
             overrides=list(overrides),
@@ -946,6 +1050,40 @@ def submit_fineweb_unified_pipeline(
     config = load_fineweb_unified_config(config_path, overrides, overlay_paths=overlay_paths)
     submission = SubmissionCoordinator(
         adapter=FineWebUnifiedSubmissionAdapter(
+            config=config,
+            config_path=config_path,
+            overrides=overrides,
+            overlay_paths=overlay_paths,
+        ),
+        artifact_store=R2ArtifactStore.from_config_file(config.r2),
+        remote_transport=SshRemoteTransport(config.ssh, config.remote),
+    )
+    return submission.submit(dry_run=dry_run, resume_run_id=resume_run_id).to_safe_dict()
+
+
+def submit_dataset_tokenization_pipeline(
+    *,
+    config_path: Path,
+    overrides: list[str],
+    dry_run: bool,
+    resume_run_id: str | None,
+    overlay_paths: tuple[Path, ...] = (),
+) -> dict[str, object]:
+    from .core.submission import R2ArtifactStore, SshRemoteTransport, SubmissionCoordinator
+    from .pipelines.dataset_tokenization.config import (
+        load_recipe_config as load_dataset_tokenization_config,
+    )
+    from .pipelines.dataset_tokenization.submission import (
+        DatasetTokenizationSubmissionAdapter,
+    )
+
+    config = load_dataset_tokenization_config(
+        config_path,
+        overrides,
+        overlay_paths=overlay_paths,
+    )
+    submission = SubmissionCoordinator(
+        adapter=DatasetTokenizationSubmissionAdapter(
             config=config,
             config_path=config_path,
             overrides=overrides,

@@ -3711,6 +3711,16 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
+dataset-tokenization = [
+    { name = "boto3" },
+    { name = "click" },
+    { name = "mlflow-skinny" },
+    { name = "pyarrow" },
+    { name = "pyyaml" },
+    { name = "ray", extra = ["data"] },
+    { name = "tokenizers" },
+    { name = "tqdm" },
+]
 dev = [
     { name = "import-linter" },
     { name = "pytest" },
@@ -3816,6 +3826,16 @@ unified-data = [
 requires-dist = [{ name = "duckdb", specifier = ">=1.5.2" }]
 
 [package.metadata.requires-dev]
+dataset-tokenization = [
+    { name = "boto3", specifier = ">=1.39.0" },
+    { name = "click", specifier = ">=8.1.8" },
+    { name = "mlflow-skinny", specifier = ">=2.22.0" },
+    { name = "pyarrow", specifier = ">=20.0.0" },
+    { name = "pyyaml", specifier = ">=6.0.2" },
+    { name = "ray", extras = ["data"], specifier = ">=2.49.0" },
+    { name = "tokenizers", specifier = ">=0.22.2" },
+    { name = "tqdm", specifier = ">=4.67.1" },
+]
 dev = [
     { name = "import-linter", specifier = ">=2.11,<3" },
     { name = "pytest", specifier = ">=9.0.3" },

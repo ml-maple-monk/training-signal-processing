@@ -1,0 +1,72 @@
+run:
+  name: dataset-tokenization-native-superbpe
+  config_version: 1
+
+ssh:
+  host: 127.0.0.1
+  port: 22
+  user: root
+  identity_file: ~/.ssh/id_ed25519
+
+remote:
+  root_dir: /tmp/training-signal-processing
+  python_version: "3.12"
+  remote_jobs_root: /tmp/dataset-tokenization-jobs
+  pgid_wait_attempts: 20
+  pgid_wait_sleep_seconds: 0.25
+  sync_paths:
+    - pyproject.toml
+    - uv.lock
+    - src
+    - config
+
+ray:
+  executor_type: ray
+  batch_size: 1
+  concurrency: 4
+  target_num_blocks: 128
+
+r2:
+  config_file: r2
+  bucket: gpu-poor
+  output_prefix: dataset/processed/tokenized/native-superbpe-1m-rows-max4w
+
+input:
+  source_root_key: dataset
+  final_parts_prefix: dataset/processed/unified-data/final-completed-20260430T160615Z/parts/
+  fineweb_run_root: dataset/processed/fineweb-unified/20260501T144323Z
+  text_column: cleaned_text
+  dropped_column: cleaning_is_dropped
+
+tokenizer:
+  name: native_superbpe_1m_rows_max4w
+  json_path: tokenizers/native_superbpe_1m_rows_max4w/tokenizer.json
+
+export:
+  read_batch_rows: 2048
+  rows_per_row_group: 8192
+  ray_num_cpus_per_worker: 1
+  ray_memory_gib_per_worker: 4
+  parquet_compression: zstd
+  parquet_compression_level: 1
+
+mlflow:
+  enabled: false
+  tracking_uri: ""
+  experiment_name: dataset-tokenization
+
+observability:
+  flush_interval_sec: 5
+  log_per_file_events: true
+  heartbeat_interval_sec: 10
+
+resumability:
+  strategy: batch_manifest
+  commit_every_batches: 1
+  resume_mode: latest
+
+ops:
+  - name: prepare_dataset_tokenization_part
+    type: mapper
+  - name: write_dataset_tokenization_part
+    type: mapper
