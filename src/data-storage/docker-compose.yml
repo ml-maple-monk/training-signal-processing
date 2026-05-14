@@ -1,0 +1,28 @@
+services:
+  postgres:
+    build: .
+    image: corpus-postgres:18
+    container_name: corpus-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: corpus
+      POSTGRES_PASSWORD: corpus_secret
+      POSTGRES_DB: corpus
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - corpus_data:/var/lib/postgresql   # PG18+: data stored in /var/lib/postgresql/18/main
+      - ./config/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./scripts:/scripts:ro   # post_load scripts accessible at /scripts/post_load/ inside container
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U corpus -d corpus"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    shm_size: 4gb  # match shared_buffers
+
+volumes:
+  corpus_data:
+    driver: local
