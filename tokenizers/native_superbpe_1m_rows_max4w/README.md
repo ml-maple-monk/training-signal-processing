@@ -23,7 +23,7 @@ tokenizer = Tokenizer.from_file(
 ids = tokenizer.encode("Saya pergi ke pasar untuk membeli ikan dan sayur.").ids
 ```
 
-See `TOKENIZER_DOCS.md` for performance tables and caveats.
+See `docs/TOKENIZER_DOCS.md` for performance tables and caveats.
 
 Reproduce the published fertility numbers with:
 

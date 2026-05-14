@@ -1,6 +1,6 @@
 # local_bpeasy_balanced_1to1
 
-Tracked BPEasy baseline tokenizer used in `TOKENIZER_DOCS.md`.
+Tracked BPEasy baseline tokenizer used in `docs/TOKENIZER_DOCS.md`.
 
 - Tokenizer JSON: `tokenizer.json`
 - Source run id: `20260501T213354Z-balanced-fineweb-1to1-full-b1024-t16`

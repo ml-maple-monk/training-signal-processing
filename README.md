@@ -3,8 +3,8 @@
 Remote OCR processing for PDF corpora, driven by YAML recipes and executed on
 GPU machines through a small protected runtime core.
 
-[Architecture](ARCHITECTURE.md) |
-[Extending](EXTENDING.md) |
+[Architecture](docs/ARCHITECTURE.md) |
+[Extending](docs/EXTENDING.md) |
 [Onboarding](ONBOARDING.md) |
 [Sample OCR recipe](config/remote_ocr.sample.yaml)
 
@@ -19,9 +19,9 @@ submission, storage, and observability stay in `core/`.
 
 - New operator: follow [ONBOARDING.md](ONBOARDING.md) to prepare credentials,
   start infrastructure, and run OCR end to end.
-- System modifier: read [ARCHITECTURE.md](ARCHITECTURE.md) before touching
+- System modifier: read [ARCHITECTURE.md](docs/ARCHITECTURE.md) before touching
   protected runtime, submission, storage, or execution code.
-- Pipeline author: use [EXTENDING.md](EXTENDING.md) for the pipeline contracts,
+- Pipeline author: use [EXTENDING.md](docs/EXTENDING.md) for the pipeline contracts,
   file layout, and verification workflow.
 - Run OCR now: start with the commands in [Quick Start](#quick-start).
 

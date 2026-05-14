@@ -9,9 +9,9 @@ Companion docs:
 
 - [README.md](README.md) — command reference, experiment
   workflow guardrails, MLflow verification snippets.
-- [ARCHITECTURE.md](ARCHITECTURE.md) — layers, contracts,
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md) — layers, contracts,
   frozen-file invariants, OCR walkthrough with diagrams.
-- [EXTENDING.md](EXTENDING.md)
+- [EXTENDING.md](docs/EXTENDING.md)
   — pre-existing op-authoring guide.
 
 ---
@@ -112,7 +112,7 @@ uv run lint-imports          # import-linter contract; must pass
 ```
 
 If `lint-imports` fails, something imported a pipeline module from
-the shared layer — see [ARCHITECTURE.md §2](ARCHITECTURE.md) for the
+the shared layer — see [ARCHITECTURE.md §2](docs/ARCHITECTURE.md) for the
 contract.
 
 ---
@@ -309,7 +309,7 @@ override `ssh.host` / `ssh.port` in the recipe.
 ### §1.4 Experiment without touching code
 
 Two config-only mechanisms — never edit logic for a tuning run.
-Full details in [ARCHITECTURE.md §5](ARCHITECTURE.md).
+Full details in [ARCHITECTURE.md §5](docs/ARCHITECTURE.md).
 
 1. **YAML overlay files** (landed in commit `25673fb`). Drop a new
    YAML under `pipelines/ocr/configs/` (only the keys you want to
@@ -337,7 +337,7 @@ branches for experiments.
 
 ## §2. Use case 2 — add a new pipeline
 
-**See [EXTENDING.md](EXTENDING.md)** for the full walkthrough. It's a
+**See [EXTENDING.md](docs/EXTENDING.md)** for the full walkthrough. It's a
 top-down educational tour through the six building blocks (config,
 ops, execute, materialize, resume, submit, plus CLI wiring) with
 complete runnable code from the committed
@@ -488,9 +488,9 @@ enable MLflow only with a directly reachable `mlflow.tracking_uri`.
 
 - [README.md](README.md) — command reference and MLflow
   verification snippets.
-- [ARCHITECTURE.md](ARCHITECTURE.md) — full layered architecture,
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md) — full layered architecture,
   ABC contracts, and the OCR end-to-end walkthrough with diagrams.
-- [EXTENDING.md](EXTENDING.md)
+- [EXTENDING.md](docs/EXTENDING.md)
   — op-authoring guide and stage-template reference.
 - [pyproject.toml](pyproject.toml) — dependency groups
   (`[dependency-groups]`) and the import-linter contract

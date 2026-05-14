@@ -1,6 +1,6 @@
 # local_bpeasy_previous_40g_cache
 
-Tracked earlier BPEasy tokenizer used in `TOKENIZER_DOCS.md`.
+Tracked earlier BPEasy tokenizer used in `docs/TOKENIZER_DOCS.md`.
 
 - Tokenizer JSON: `tokenizer.json`
 - Source run id: `20260501T201106Z-rclone-40g-t16-full-b1024-t16`

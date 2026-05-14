@@ -23,7 +23,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Reproduce the native_superbpe_1m_rows_max4w fertility numbers "
-            "published in TOKENIZER_DOCS.md."
+            "published in docs/TOKENIZER_DOCS.md."
         )
     )
     parser.add_argument("--tokenizer-json", type=Path, default=TOKENIZER_JSON)
@@ -147,7 +147,7 @@ def assert_expected_metrics(*, expected: dict[str, Any], actual: dict[str, Any])
             lineterm="",
         )
     )
-    raise SystemExit(f"Fertility metrics differ from TOKENIZER_DOCS.md:\n{diff}")
+    raise SystemExit(f"Fertility metrics differ from docs/TOKENIZER_DOCS.md:\n{diff}")
 
 
 if __name__ == "__main__":
