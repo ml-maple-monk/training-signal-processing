@@ -7,8 +7,12 @@ name = "training-signal-processing"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    "asyncpg>=0.31.0",
     "duckdb>=1.5.2",
+    "huggingface-hub>=0.36.2",
+    "pandas>=2.3.3",
     "psycopg2-binary>=2.9.12",
+    "pyarrow>=24.0.0",
 ]
 
 [tool.uv]
@@ -132,6 +136,9 @@ ui = [
     "click>=8.1.8",
     "gradio>=4,<6",
     "pyarrow>=20.0.0",
+]
+near_dedup = [
+    "datasketch>=1.6",
 ]
 
 [tool.pytest.ini_options]
