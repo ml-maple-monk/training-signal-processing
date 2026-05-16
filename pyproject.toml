@@ -140,6 +140,11 @@ ui = [
 near_dedup = [
     "datasketch>=1.6",
 ]
+fineweb_2_lite = [
+    "click>=8.1.8",
+    "pyyaml>=6.0.2",
+    "regex>=2024.4.28,<2025.0.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

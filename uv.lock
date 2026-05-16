@@ -3826,6 +3826,11 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "ruff" },
 ]
+fineweb-2-lite = [
+    { name = "click" },
+    { name = "pyyaml" },
+    { name = "regex" },
+]
 fineweb-unified = [
     { name = "boto3" },
     { name = "click" },
@@ -3950,6 +3955,11 @@ dev = [
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "ruff", specifier = ">=0.15.11" },
+]
+fineweb-2-lite = [
+    { name = "click", specifier = ">=8.1.8" },
+    { name = "pyyaml", specifier = ">=6.0.2" },
+    { name = "regex", specifier = ">=2024.4.28,<2025.0.0" },
 ]
 fineweb-unified = [
     { name = "boto3", specifier = ">=1.39.0" },
