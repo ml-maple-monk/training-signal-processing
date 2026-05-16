@@ -45,6 +45,15 @@ class NearDedupConfig:
     # Doubled from 50K to halve the number of COPY+commit round-trips per worker.
     copy_buffer_rows: int = 100_000
 
+    # Bounded look-ahead window (in doc_id units) per batch query. The batch
+    # SELECT scans only (cursor, cursor + scan_window_ids], not the whole worker
+    # range. unified_document_texts is partitioned by source, so ORDER BY doc_id
+    # over the parent cannot early-terminate — it sorts every matching row in the
+    # scanned span. Capping the span keeps that sort small enough to stay in
+    # work_mem instead of spilling to disk. 50K ids ≈ ≤ ~10K matching docs even
+    # in the densest (lowyat) region, so the sort stays well within memory.
+    scan_window_ids: int = 50_000
+
     # Parallel worker processes. Each opens its own DB connection and handles a
     # contiguous doc_id range. Keep ≤ 4 on WSL2 to avoid RAM exhaustion (each
     # worker imports Python + datasketch + numpy ≈ 300 MB).

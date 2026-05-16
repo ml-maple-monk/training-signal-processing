@@ -105,23 +105,41 @@ def compute_bands_for_range(
         t_start = time.monotonic()
 
         open_ended = end_id == 9223372036854775807
+        # Resolve a concrete upper bound for the cursor walk. The last worker is
+        # open-ended (end_id = INT8_MAX); cap it at the current MAX(doc_id) so the
+        # window walk terminates. Docs ingested past this snapshot are picked up by
+        # the next pipeline run (the autorestart loop re-invokes Phase 1).
+        if open_ended:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COALESCE(MAX(doc_id), %s) FROM unified_document_texts",
+                            (start_id,))
+                effective_end: int = cur.fetchone()[0]
+        else:
+            effective_end = end_id
+
         # Correctness comes from the per-batch anti-join (NOT EXISTS against
-        # lsh_candidate_bands in the SELECT below), so coverage need not be
-        # contiguous and a MAX(doc_id) watermark is unsafe: docs processed out
-        # of doc_id order (e.g. high-id rows ingested while low-id rows are
-        # still pending) would push the watermark past unprocessed docs and
-        # silently skip them. last_doc_id is only an intra-run forward cursor —
-        # it starts at the range low and advances past returned rows each batch
-        # so un-flushed docs are not re-fetched within a run. Already-processed
-        # docs anywhere in the range are excluded by the anti-join, making
-        # restarts safe without re-processing.
-        last_doc_id = start_id
+        # lsh_candidate_bands), so coverage need not be contiguous and a
+        # MAX(doc_id) watermark is unsafe: docs processed out of doc_id order
+        # (e.g. high-id rows ingested while low-id rows are still pending) would
+        # push the watermark past unprocessed docs and silently skip them.
+        #
+        # The cursor walks the range in bounded scan_window_ids spans rather than
+        # one open SELECT over the whole range: unified_document_texts is
+        # partitioned by source, so ORDER BY doc_id over the parent cannot
+        # early-terminate under LIMIT — it sorts every matching row in the scanned
+        # span (spilling to disk for a full-range span). A bounded span keeps that
+        # sort in work_mem. Within a span LIMIT batch_size still bounds memory; if
+        # a span yields a full batch more may remain, so advance to the last row;
+        # otherwise the span is exhausted, jump to its end. Already-processed docs
+        # anywhere are excluded by the anti-join, so restarts never re-process.
+        cursor_id = start_id
         worker_log.info(
-            "worker %d  start  range=(%d, %s]",
-            worker_id, start_id, "∞" if open_ended else end_id,
+            "worker %d  start  range=(%d, %s]  effective_end=%d",
+            worker_id, start_id, "∞" if open_ended else end_id, effective_end,
         )
 
-        while True:
+        while cursor_id < effective_end:
+            window_hi = min(cursor_id + cfg.scan_window_ids, effective_end)
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -140,30 +158,32 @@ def compute_bands_for_range(
                     ORDER BY t.doc_id
                     LIMIT  %s
                     """,
-                    (last_doc_id, end_id, cfg.min_text_length, cfg.batch_size),
+                    (cursor_id, window_hi, cfg.min_text_length, cfg.batch_size),
                 )
                 rows = cur.fetchall()
 
-            if not rows:
-                break
+            if rows:
+                for doc_id, text in rows:
+                    for band_index, band_hash in _minhash_bands(text, cfg):
+                        buffer.append((doc_id, band_index, band_hash))
+                        if len(buffer) >= cfg.copy_buffer_rows:
+                            total_inserted += _flush_buffer(conn, buffer)
+                            buffer.clear()
+                docs_processed += len(rows)
+                batch_num += 1
 
-            for doc_id, text in rows:
-                for band_index, band_hash in _minhash_bands(text, cfg):
-                    buffer.append((doc_id, band_index, band_hash))
-                    if len(buffer) >= cfg.copy_buffer_rows:
-                        total_inserted += _flush_buffer(conn, buffer)
-                        buffer.clear()
+            if len(rows) == cfg.batch_size:
+                cursor_id = rows[-1][0]      # span may hold more — resume past it
+            else:
+                cursor_id = window_hi        # span exhausted — jump ahead
 
-            docs_processed += len(rows)
-            last_doc_id = rows[-1][0]
-            batch_num += 1
-
-            elapsed = time.monotonic() - t_start
-            rate = docs_processed / elapsed if elapsed > 0 else 0
-            worker_log.info(
-                "worker %d  docs=%d  rate=%.0f doc/s  elapsed=%.0fs",
-                worker_id, docs_processed, rate, elapsed,
-            )
+            if rows:
+                elapsed = time.monotonic() - t_start
+                rate = docs_processed / elapsed if elapsed > 0 else 0
+                worker_log.info(
+                    "worker %d  docs=%d  cursor=%d  rate=%.0f doc/s  elapsed=%.0fs",
+                    worker_id, docs_processed, cursor_id, rate, elapsed,
+                )
 
         if buffer:
             total_inserted += _flush_buffer(conn, buffer)
