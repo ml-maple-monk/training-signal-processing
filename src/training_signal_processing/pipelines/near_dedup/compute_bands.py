@@ -7,11 +7,12 @@ The last chunk is open-ended (no upper bound) so docs ingested while
 the pipeline is running are naturally picked up by the last worker.
 Each worker opens its own DB connection and writes independently.
 
-Incremental mode (default): reads MAX(doc_id) from lsh_candidate_bands as
-the high-watermark and only processes new docs. Safe to re-run as the
-source table grows. On a crash, lsh_candidate_bands is UNLOGGED so it may
-be empty on restart — in that case incremental falls back to processing all
-docs from scratch (correct behaviour, just slower).
+Incremental mode (default): each batch filters with NOT EXISTS against
+lsh_candidate_bands, so only docs not yet banded are processed. This is
+correct regardless of doc_id ordering — unlike a MAX(doc_id) watermark,
+which silently skips unprocessed docs when coverage is non-contiguous
+(e.g. high-id rows ingested while low-id rows are still pending). Safe to
+re-run as the source table grows and safe to restart after a crash.
 
 Memory peak per worker: O(batch_size × num_permutations × 4 bytes)
 e.g. 10K docs × 128 perms × 4B ≈ 5 MB per worker.
@@ -104,26 +105,21 @@ def compute_bands_for_range(
         t_start = time.monotonic()
 
         open_ended = end_id == 9223372036854775807
-        # Self-resume: find the highest doc_id already written for this worker's range.
-        # Allows restarting after a crash without re-processing completed docs.
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT COALESCE(MAX(doc_id), %s) FROM lsh_candidate_bands "
-                "WHERE doc_id > %s AND doc_id <= %s",
-                (start_id, start_id, end_id),
-            )
-            last_doc_id: int = cur.fetchone()[0]
-
-        if last_doc_id > start_id:
-            worker_log.info(
-                "worker %d  resuming  range=(%d, %s]  last_processed=%d",
-                worker_id, start_id, "∞" if open_ended else end_id, last_doc_id,
-            )
-        else:
-            worker_log.info(
-                "worker %d  start  range=(%d, %s]",
-                worker_id, start_id, "∞" if open_ended else end_id,
-            )
+        # Correctness comes from the per-batch anti-join (NOT EXISTS against
+        # lsh_candidate_bands in the SELECT below), so coverage need not be
+        # contiguous and a MAX(doc_id) watermark is unsafe: docs processed out
+        # of doc_id order (e.g. high-id rows ingested while low-id rows are
+        # still pending) would push the watermark past unprocessed docs and
+        # silently skip them. last_doc_id is only an intra-run forward cursor —
+        # it starts at the range low and advances past returned rows each batch
+        # so un-flushed docs are not re-fetched within a run. Already-processed
+        # docs anywhere in the range are excluded by the anti-join, making
+        # restarts safe without re-processing.
+        last_doc_id = start_id
+        worker_log.info(
+            "worker %d  start  range=(%d, %s]",
+            worker_id, start_id, "∞" if open_ended else end_id,
+        )
 
         while True:
             with conn.cursor() as cur:
@@ -137,6 +133,10 @@ def compute_bands_for_range(
                       AND  d.cleaning_is_dropped = FALSE
                       AND  t.cleaned_text IS NOT NULL
                       AND  char_length(t.cleaned_text) > %s
+                      AND  NOT EXISTS (
+                               SELECT 1 FROM lsh_candidate_bands b
+                               WHERE  b.doc_id = t.doc_id
+                           )
                     ORDER BY t.doc_id
                     LIMIT  %s
                     """,
@@ -189,9 +189,10 @@ def compute_bands(conn_str: str, cfg: NearDedupConfig, *, incremental: bool = Tr
     Compute MinHash bands for all eligible docs and write to lsh_candidate_bands.
 
     incremental=True (default):
-        Queries per-chunk watermarks from lsh_candidate_bands before splitting ranges,
-        skips fully-covered chunks, and redistributes remaining work into exactly
-        num_workers balanced ranges. Workers self-resume from their per-range watermark.
+        Splits the doc_id space evenly across num_workers ranges. Each worker
+        filters every batch with NOT EXISTS against lsh_candidate_bands, so
+        already-banded docs are skipped no matter where they fall — correct
+        even when coverage is non-contiguous. Backed by lsh_candidate_bands_doc_id_idx.
 
     incremental=False (full):
         TRUNCATEs lsh_candidate_bands first, then processes all docs.
@@ -205,17 +206,21 @@ def compute_bands(conn_str: str, cfg: NearDedupConfig, *, incremental: bool = Tr
     conn = psycopg2.connect(conn_str)
     try:
         if incremental:
-            start_id = 0
-            log.info("Incremental/resume mode: workers will self-resume per range")
+            log.info(
+                "Incremental mode: workers skip already-processed docs via a "
+                "per-batch anti-join against lsh_candidate_bands"
+            )
         else:
             with conn.cursor() as cur:
                 cur.execute("TRUNCATE lsh_candidate_bands")
             conn.commit()
-            start_id = 0
             log.info("Full mode: lsh_candidate_bands truncated, starting from doc_id=0")
 
+        start_id = 0
+
         with conn.cursor() as cur:
-            # Fast snapshot for range-splitting only — workers apply the real filters per batch.
+            # Fast snapshot for range-splitting only — workers apply the real
+            # filters (including the anti-join) per batch.
             cur.execute("SELECT COALESCE(MAX(doc_id), 0) FROM unified_document_texts")
             snapshot_max_id: int = cur.fetchone()[0]
 
@@ -223,80 +228,34 @@ def compute_bands(conn_str: str, cfg: NearDedupConfig, *, incremental: bool = Tr
             log.info("No docs in unified_document_texts — nothing to process")
             return 0
 
+        # Even split of [0, snapshot_max] into num_workers contiguous ranges.
+        # Coverage-correctness no longer depends on how ranges are drawn — the
+        # per-batch anti-join skips any doc already in lsh_candidate_bands — so a
+        # plain even split is sufficient. The last range is open-ended so docs
+        # ingested after the snapshot are still picked up.
         doc_count = snapshot_max_id - start_id
-
-        # --- Step 1: coarse split to probe watermarks ---
-        coarse_chunk = (doc_count + cfg.num_workers - 1) // cfg.num_workers
-        coarse: list[tuple[int, int]] = []
+        chunk = (doc_count + cfg.num_workers - 1) // cfg.num_workers
         for i in range(cfg.num_workers):
-            lo = start_id + i * coarse_chunk
-            hi = start_id + (i + 1) * coarse_chunk if i < cfg.num_workers - 1 else INT8_MAX
+            lo = start_id + i * chunk
+            hi = start_id + (i + 1) * chunk if i < cfg.num_workers - 1 else INT8_MAX
             if lo < snapshot_max_id:
-                coarse.append((lo, hi))
-
-        # --- Step 2: query per-chunk watermarks; build remaining intervals ---
-        # Fully-covered chunks (watermark == effective_hi) are omitted from remaining.
-        remaining: list[tuple[int, int]] = []
-        for lo, hi in coarse:
-            effective_hi = snapshot_max_id if hi == INT8_MAX else hi
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT COALESCE(MAX(doc_id), %s) FROM lsh_candidate_bands "
-                    "WHERE doc_id > %s AND doc_id <= %s",
-                    (lo, lo, effective_hi),
-                )
-                watermark: int = cur.fetchone()[0]
-            if watermark < effective_hi:
-                remaining.append((watermark, hi))
-
-        if not remaining:
-            log.info("All ranges fully covered — nothing to process")
-            return 0
-
-        # --- Step 3: split remaining intervals into num_workers balanced worker ranges ---
-        # Intervals in `remaining` may be non-contiguous (fully-covered chunks are omitted).
-        # Ranges must NOT span gaps — bridging a covered gap sets the watermark to the gap's
-        # far end, silently skipping unprocessed docs at the near end. Each remaining interval
-        # is independently split into proportional sub-ranges to avoid this.
-        total_remaining = sum(
-            (snapshot_max_id if hi == INT8_MAX else hi) - lo
-            for lo, hi in remaining
-        )
-        target = max(1, total_remaining // cfg.num_workers)
-
-        for idx, (seg_lo, seg_hi) in enumerate(remaining):
-            effective_hi = snapshot_max_id if seg_hi == INT8_MAX else seg_hi
-            seg_size = effective_hi - seg_lo
-            is_last = idx == len(remaining) - 1
-
-            slots_left = cfg.num_workers - len(ranges)
-            segs_left = len(remaining) - idx
-
-            # Last interval gets all remaining slots; others reserve 1 slot per future interval.
-            if is_last:
-                n_splits = slots_left
-            else:
-                max_splits = max(1, slots_left - (segs_left - 1))
-                n_splits = max(1, min(max_splits, round(seg_size / target)))
-
-            chunk = seg_size // n_splits
-            for j in range(n_splits):
-                lo = seg_lo + j * chunk
-                # Last sub-range of this interval: preserve INT8_MAX if applicable.
-                hi = seg_hi if j == n_splits - 1 else seg_lo + (j + 1) * chunk
                 ranges.append((lo, hi))
 
-            if len(ranges) >= cfg.num_workers:
-                break
-
-        # Final range is always open-ended so docs arriving after the snapshot are included.
-        if ranges:
-            ranges[-1] = (ranges[-1][0], INT8_MAX)
-
         log.info(
-            "Remaining ~%d doc-ids redistributed into %d balanced worker ranges (snapshot max=%d)",
-            total_remaining, len(ranges), snapshot_max_id,
+            "Doc-id space [0, %d] split into %d worker ranges (anti-join incremental)",
+            snapshot_max_id, len(ranges),
         )
+
+        # The per-batch anti-join needs an index on lsh_candidate_bands.doc_id,
+        # otherwise each NOT EXISTS degrades to a seq scan over all band rows.
+        # Idempotent and non-destructive (adds an index only).
+        with conn.cursor() as cur:
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS lsh_candidate_bands_doc_id_idx "
+                "ON lsh_candidate_bands (doc_id)"
+            )
+        conn.commit()
+        log.info("Ensured lsh_candidate_bands_doc_id_idx exists for anti-join")
     finally:
         conn.close()
 

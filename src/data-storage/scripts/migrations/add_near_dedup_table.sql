@@ -29,3 +29,10 @@ CREATE TABLE IF NOT EXISTS lsh_candidate_bands (
     band_hash  BIGINT   NOT NULL
 );
 -- Note: index lsh_candidate_bands_band_idx is created by compute_bands.py after COPY is done.
+
+-- doc_id index backs the per-batch anti-join in incremental mode
+-- (NOT EXISTS against this table). compute_bands.py also ensures this index
+-- exists at runtime via CREATE INDEX IF NOT EXISTS; declared here so fresh
+-- deployments have it from the start.
+CREATE INDEX IF NOT EXISTS lsh_candidate_bands_doc_id_idx
+    ON lsh_candidate_bands (doc_id);
