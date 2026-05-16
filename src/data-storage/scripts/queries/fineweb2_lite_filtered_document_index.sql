@@ -1,33 +1,36 @@
--- FineWeb2-Lite Malay filtered current snapshot export.
+-- FineWeb2-Lite retained document index.
 --
--- This is intentionally read-only: it selects from the metadata, unified text,
--- LID, and near-dedup tables without writing to any database table.
+-- This is the editable source of truth for retained-document filtering.
+-- It intentionally does not select cleaned text; parquet export joins text later.
 --
-
+-- Parameters:
+--   $1::text = profile_name
+--   $2::text = run_id
 
 with params as (
     select
-        'fineweb2-lite-metadata-full-20260515T183115Z'::text as run_id
+        $1::text as profile_name,
+        $2::text as run_id
 )
 select
+    p.profile_name,
     m.run_id,
     m.doc_id,
+    m.source_doc_id,
     coalesce(ud.cleaning_source, m.cleaning_source, 'unknown') as source_domain,
     dld.language_label as lid_label,
     dld.confidence as lid_confidence,
-    t.cleaned_text as completed_text
+    m.created_at as metadata_created_at,
+    dld.detected_at as lid_detected_at
 from fineweb2_lite_quality_metadata m
 join params p
     on p.run_id = m.run_id
 join unified_documents ud
     on ud.doc_id = m.doc_id
-join unified_document_texts t
-    on t.doc_id = m.doc_id
 join document_language_detection dld
     on dld.doc_id = m.doc_id
 where m.input_source = 'unified'
     and ud.cleaning_is_dropped = false
-    and t.cleaned_text is not null
     and not exists (
         select 1
         from document_near_duplicates nd
