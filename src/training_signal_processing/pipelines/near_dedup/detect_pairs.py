@@ -1,20 +1,29 @@
 """
-Phase 2: group lsh_candidate_bands → candidate pair_bands dict.
+Phase 2: band-sharded parallel scan of lsh_candidate_bands → candidate pairs.
 Phase 3: Union-Find closure so every canonical_doc_id points to the cluster root.
 Phase 4: bulk-upsert into document_near_duplicates.
 Phase 5: drop lsh_candidate_bands to reclaim disk.
 
-Memory: O(|candidate pairs| × ~200 bytes) + O(|distinct doc_ids| × 8 bytes).
-Worst case for 1M pairs ≈ ~220 MB — well within typical server memory.
+Phase 2 is parallelised by band_index: a (band_index, band_hash) collision
+group is wholly contained in one band_index, so the 16 bands shard cleanly
+across cfg.num_workers processes. Each worker GROUP BYs only its bands,
+pre-aggregates pair counts in a bounded local dict, and bulk-COPYs partial
+(doc_a, doc_b, cnt) rows into the UNLOGGED work table near_dedup_pair_counts.
+The parent then merges with a single SQL `GROUP BY doc_a, doc_b SUM(cnt)`
+streamed through a server-side cursor — far cheaper than the original
+single-process O(group²) expansion over every band group.
 
-A server-side named cursor is used so PostgreSQL streams band groups without
-materialising the full 608M-row result set on the client.
+Memory: O(|candidate pairs| × ~200 bytes) + O(|distinct doc_ids| × 8 bytes)
+in the parent for Phase 3; each worker holds only ≤ copy_buffer_rows
+pre-aggregated pairs before flushing.
 """
 from __future__ import annotations
 
+import io
 import logging
 import time
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import psycopg2
 import psycopg2.extras
@@ -22,6 +31,8 @@ import psycopg2.extras
 from .config import NearDedupConfig
 
 log = logging.getLogger(__name__)
+
+PAIR_COUNTS_TABLE = "near_dedup_pair_counts"
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +59,86 @@ def _union(parent: list[int], x: int, y: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Phase 2 worker (module-level for ProcessPoolExecutor pickling)
+# ---------------------------------------------------------------------------
+
+
+def _flush_pair_counts(
+    conn: psycopg2.extensions.connection, local: dict[tuple[int, int], int]
+) -> int:
+    """COPY a worker's pre-aggregated pair counts into the work table."""
+    if not local:
+        return 0
+    payload = "".join(f"{a}\t{b}\t{c}\n" for (a, b), c in local.items())
+    with conn.cursor() as cur:
+        cur.copy_from(
+            io.StringIO(payload), PAIR_COUNTS_TABLE, columns=("doc_a", "doc_b", "cnt")
+        )
+    conn.commit()
+    return len(local)
+
+
+def _compute_partial_pairs(
+    conn_str: str, cfg: NearDedupConfig, band_indexes: list[int], worker_id: int
+) -> tuple[int, int]:
+    """
+    GROUP BY this worker's band_index subset, pre-aggregate pair counts in a
+    bounded local dict, and bulk-COPY them into near_dedup_pair_counts.
+
+    Pre-aggregating before flush collapses repeated pair collisions within the
+    worker's bands; the parent's final SQL SUM(cnt) handles cross-worker and
+    cross-flush merging, so flush boundaries do not affect correctness.
+
+    Returns (band_groups_seen, pair_rows_written).
+    """
+    wlog = logging.getLogger(f"{__name__}.phase2w{worker_id}")
+    conn = psycopg2.connect(conn_str)
+    try:
+        local: dict[tuple[int, int], int] = defaultdict(int)
+        groups = 0
+        rows_written = 0
+        t0 = time.monotonic()
+
+        with conn.cursor(name=f"band_groups_w{worker_id}") as cur:
+            cur.itersize = 5_000
+            cur.execute(
+                """
+                SELECT array_agg(doc_id ORDER BY doc_id) AS docs
+                FROM   lsh_candidate_bands
+                WHERE  band_index = ANY(%s)
+                GROUP  BY band_index, band_hash
+                HAVING count(*) > 1
+                """,
+                (band_indexes,),
+            )
+            for (docs,) in cur:
+                for i in range(len(docs)):
+                    di = docs[i]
+                    for j in range(i + 1, len(docs)):
+                        local[(di, docs[j])] += 1  # docs sorted → di < docs[j]
+                groups += 1
+                if len(local) >= cfg.copy_buffer_rows:
+                    rows_written += _flush_pair_counts(conn, local)
+                    local = defaultdict(int)
+                if groups % 50_000 == 0:
+                    elapsed = time.monotonic() - t0
+                    rate = groups / elapsed if elapsed > 0 else 0
+                    wlog.info(
+                        "phase2 w%d  bands=%s  groups=%d  rows=%d  rate=%.0f grp/s",
+                        worker_id, band_indexes, groups, rows_written, rate,
+                    )
+
+        rows_written += _flush_pair_counts(conn, local)
+        wlog.info(
+            "phase2 w%d done  bands=%s  groups=%d  pair_rows=%d  elapsed=%.0fs",
+            worker_id, band_indexes, groups, rows_written, time.monotonic() - t0,
+        )
+        return groups, rows_written
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -68,40 +159,62 @@ def detect_pairs(conn_str: str, cfg: NearDedupConfig, *, keep_bands: bool = True
     """
     conn = psycopg2.connect(conn_str)
     try:
-        # --- Phase 2: collect candidate pairs from band collisions ---
+        # --- Phase 2: band-sharded parallel scan → near_dedup_pair_counts ---
         # pair_bands[(smaller_doc_id, larger_doc_id)] = count of shared bands
         pair_bands: dict[tuple[int, int], int] = defaultdict(int)
 
-        log.info("Phase 2: streaming band groups from lsh_candidate_bands…")
         t2 = time.monotonic()
-        with conn.cursor(name="band_groups") as cur:
-            cur.itersize = 5_000
+        # UNLOGGED work table: transient, always rebuilt; dropped after merge.
+        with conn.cursor() as cur:
             cur.execute(
-                """
-                SELECT array_agg(doc_id ORDER BY doc_id) AS docs
-                FROM   lsh_candidate_bands
-                GROUP  BY band_index, band_hash
-                HAVING count(*) > 1
-                """
+                f"CREATE UNLOGGED TABLE IF NOT EXISTS {PAIR_COUNTS_TABLE} ("
+                "  doc_a BIGINT NOT NULL,"
+                "  doc_b BIGINT NOT NULL,"
+                "  cnt   INTEGER NOT NULL)"
             )
-            group_count = 0
-            for (docs,) in cur:
-                for i in range(len(docs)):
-                    for j in range(i + 1, len(docs)):
-                        key = (docs[i], docs[j])  # docs[i] < docs[j] due to ORDER BY
-                        pair_bands[key] += 1
-                group_count += 1
-                if group_count % 10_000 == 0:
-                    elapsed = time.monotonic() - t2
-                    rate = group_count / elapsed if elapsed > 0 else 0
-                    log.info(
-                        "  phase2  groups=%d  pairs=%d  elapsed=%.0fs  rate=%.0f grp/s",
-                        group_count, len(pair_bands), elapsed, rate,
-                    )
+            cur.execute(f"TRUNCATE {PAIR_COUNTS_TABLE}")
+        conn.commit()
+
+        # A (band_index, band_hash) group lives in exactly one band_index, so
+        # the bands shard cleanly. Cannot shard finer than one band per worker.
+        n_workers = min(cfg.num_workers, cfg.num_bands)
+        shards: list[list[int]] = [[] for _ in range(n_workers)]
+        for b in range(cfg.num_bands):
+            shards[b % n_workers].append(b)
+        shards = [s for s in shards if s]
+
+        log.info(
+            "Phase 2: %d workers over %d bands, shards=%s",
+            len(shards), cfg.num_bands, shards,
+        )
+        total_groups = 0
+        with ProcessPoolExecutor(max_workers=len(shards)) as ex:
+            futs = {
+                ex.submit(_compute_partial_pairs, conn_str, cfg, bands, i): i
+                for i, bands in enumerate(shards)
+            }
+            for fut in as_completed(futs):
+                g, _ = fut.result()  # re-raises worker exceptions
+                total_groups += g
+
+        # Merge: single SQL aggregation streamed through a server-side cursor.
+        log.info("Phase 2: merging partial pair counts (SQL SUM)…")
+        with conn.cursor(name="pair_merge") as cur:
+            cur.itersize = 50_000
+            cur.execute(
+                f"SELECT doc_a, doc_b, SUM(cnt) "
+                f"FROM {PAIR_COUNTS_TABLE} GROUP BY doc_a, doc_b"
+            )
+            for a, b, c in cur:
+                pair_bands[(a, b)] = c
+
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS {PAIR_COUNTS_TABLE}")
+        conn.commit()
 
         log.info(
             "Phase 2 done: %d candidate pairs  %d band groups  elapsed=%.0fs",
-            len(pair_bands), group_count, time.monotonic() - t2,
+            len(pair_bands), total_groups, time.monotonic() - t2,
         )
 
         # --- Phase 3: Union-Find closure over candidate pairs ---
