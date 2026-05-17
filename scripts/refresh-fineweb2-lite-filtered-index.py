@@ -208,6 +208,29 @@ async def refresh(args: argparse.Namespace) -> None:
                     filter_hash,
                 )
             else:
+                # Retraction: a doc indexed as valid in a prior refresh can
+                # later enter document_near_duplicates (Phase 2 dedup runs
+                # asynchronously). Its metadata/LID timestamps do not change,
+                # so the watermark upsert below never re-examines it. Without
+                # this DELETE, stale duplicates accumulate in the index
+                # forever (only --mode full purged them). Unconditional and
+                # idempotent: removes any row for this profile/run whose
+                # doc_id is now a known near-duplicate.
+                rows_deleted = affected_rows(
+                    await conn.execute(
+                        """
+                        DELETE FROM fineweb2_lite_filtered_document_index fi
+                        WHERE fi.profile_name = $1
+                          AND fi.run_id = $2
+                          AND EXISTS (
+                              SELECT 1 FROM document_near_duplicates nd
+                              WHERE nd.doc_id = fi.doc_id
+                          )
+                        """,
+                        args.profile_name,
+                        args.run_id,
+                    )
+                )
                 insert_tag = await conn.execute(
                     insert_sql,
                     args.profile_name,
