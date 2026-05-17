@@ -6,8 +6,11 @@ detection, and writes (doc_id, language_label, confidence) to
 document_language_detection.
 
 Two modes:
-  incremental (default): only processes docs not yet in the result table
-      (workers self-resume from MAX(doc_id) in their assigned range).
+  incremental (default): orchestrator probes per-chunk watermarks, detects
+      coverage gaps (including poisoned watermarks from prior runs with
+      different range boundaries), and dispatches workers starting from the
+      first uncovered doc in each chunk. ON CONFLICT DO NOTHING makes
+      re-runs idempotent.
   full (--full): TRUNCATEs document_language_detection then processes all docs.
       TRUNCATE happens only after the Malaya model loads successfully.
 
@@ -76,24 +79,16 @@ def detect_for_range(
     conn = psycopg2.connect(conn_str)
     try:
         open_ended = end_id == 9223372036854775807
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT COALESCE(MAX(doc_id), %s) FROM document_language_detection "
-                "WHERE doc_id > %s AND doc_id <= %s",
-                (start_id, start_id, end_id),
-            )
-            last_doc_id: int = cur.fetchone()[0]
-
-        if last_doc_id > start_id:
-            worker_log.info(
-                "worker %d  resuming  range=(%d, %s]  last_processed=%d",
-                worker_id, start_id, "∞" if open_ended else end_id, last_doc_id,
-            )
-        else:
-            worker_log.info(
-                "worker %d  start  range=(%d, %s]",
-                worker_id, start_id, "∞" if open_ended else end_id,
-            )
+        # start_id is the orchestrator-computed watermark (actual first gap - 1).
+        # We do NOT self-resume from MAX(LID) here — that watermark can be poisoned
+        # by previous runs with different range boundaries that wrote a high doc_id
+        # without covering earlier docs in this range. ON CONFLICT DO NOTHING handles
+        # any already-covered docs the worker re-encounters.
+        last_doc_id: int = start_id
+        worker_log.info(
+            "worker %d  start  range=(%d, %s]",
+            worker_id, start_id, "∞" if open_ended else end_id,
+        )
 
         total_written = 0
         docs_processed = 0
@@ -182,7 +177,8 @@ def detect_language(conn_str: str, cfg: LangDetectConfig, *, incremental: bool =
     """
     Detect language for all eligible docs and write to document_language_detection.
 
-    incremental=True (default): workers self-resume from MAX(doc_id) in their range.
+    incremental=True (default): probes per-chunk watermarks, detects coverage gaps,
+        and dispatches workers from the first uncovered doc in each chunk.
     incremental=False (--full): TRUNCATEs the table first (only after model pre-warm).
     """
     INT8_MAX = 9223372036854775807
@@ -220,6 +216,10 @@ def detect_language(conn_str: str, cfg: LangDetectConfig, *, incremental: bool =
         ]
 
         # Step 2: skip fully-covered chunks; collect intervals with remaining work.
+        # Fast path: MAX(LID doc_id) < effective_hi → range has work from watermark.
+        # Slow path: MAX >= effective_hi (appears covered) → verify with NOT EXISTS to
+        #   catch "poisoned watermarks" — a previous run with different range boundaries
+        #   may have written a doc at effective_hi without covering earlier eligible docs.
         remaining: list[tuple[int, int]] = []
         for lo, hi in coarse:
             effective_hi = snapshot_max_id if hi == INT8_MAX else hi
@@ -232,6 +232,38 @@ def detect_language(conn_str: str, cfg: LangDetectConfig, *, incremental: bool =
                 watermark: int = cur.fetchone()[0]
             if watermark < effective_hi:
                 remaining.append((watermark, hi))
+            else:
+                # Appears fully covered — check for gaps before accepting.
+                # ORDER BY + LIMIT 1 lets PG terminate early once it finds the
+                # first uncovered doc (much faster than MIN over the full range).
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT t.doc_id - 1
+                        FROM   unified_document_texts t
+                        JOIN   unified_documents      d USING (doc_id)
+                        WHERE  t.doc_id > %s AND t.doc_id <= %s
+                          AND  d.cleaning_is_dropped = FALSE
+                          AND  t.cleaned_text IS NOT NULL
+                          AND  char_length(t.cleaned_text) > %s
+                          AND  NOT EXISTS (
+                              SELECT 1 FROM document_language_detection l
+                              WHERE l.doc_id = t.doc_id
+                          )
+                        ORDER BY t.doc_id
+                        LIMIT 1
+                        """,
+                        (lo, effective_hi, cfg.min_text_length),
+                    )
+                    row = cur.fetchone()
+                actual_watermark = row[0] if row else effective_hi
+                if actual_watermark < effective_hi:
+                    log.info(
+                        "Chunk (%d, %s]: poisoned watermark detected — "
+                        "gap starts at doc_id %d",
+                        lo, "∞" if hi == INT8_MAX else str(hi), actual_watermark + 1,
+                    )
+                    remaining.append((actual_watermark, hi))
     finally:
         conn.close()
 
