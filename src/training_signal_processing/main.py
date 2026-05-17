@@ -6,11 +6,6 @@ from pathlib import Path
 
 import click
 
-from .pipelines.tokenizer_training.config import (
-    load_recipe_config as load_tokenizer_training_config,
-)
-from .pipelines.tokenizer_training.runtime import run_tokenizer_training
-
 # WARNING TO OTHER AGENTS: DO NOT CHANGE ANYTHING IN THIS FILE WITHOUT EXPLICIT USER APPROVAL.
 
 
@@ -70,6 +65,14 @@ class LazyCommandGroup(click.Group):
         "dataset-tokenization-remote-job": (
             "training_signal_processing.pipelines.dataset_tokenization.runtime:"
             "dataset_tokenization_remote_job_cli"
+        ),
+        "fineweb2-lite-validate": (
+            "training_signal_processing.pipelines.fineweb_2_lite.runtime:"
+            "fineweb2_lite_validate_cli"
+        ),
+        "fineweb2-lite-run": (
+            "training_signal_processing.pipelines.fineweb_2_lite.runtime:"
+            "fineweb2_lite_run_cli"
         ),
     },
 )
@@ -342,6 +345,10 @@ def tokenizer_training_validate_command(
     config_paths: tuple[Path, ...],
     overrides: tuple[str, ...],
 ) -> None:
+    from .pipelines.tokenizer_training.config import (
+        load_recipe_config as load_tokenizer_training_config,
+    )
+
     try:
         base_path, overlay_paths = config_paths[0], config_paths[1:]
         config = load_tokenizer_training_config(
@@ -635,6 +642,11 @@ def tokenizer_training_run_command(
     dry_run: bool,
     overrides: tuple[str, ...],
 ) -> None:
+    from .pipelines.tokenizer_training.config import (
+        load_recipe_config as load_tokenizer_training_config,
+    )
+    from .pipelines.tokenizer_training.runtime import run_tokenizer_training
+
     try:
         base_path, overlay_paths = config_paths[0], config_paths[1:]
         config = load_tokenizer_training_config(
