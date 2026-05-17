@@ -46,17 +46,18 @@ DEFAULT_PARTS_DIR = (
     "/final-completed-20260430T160615Z/parts"
 )
 DEFAULT_PROGRESS_FILE = "ingest_progress.json"
-DEFAULT_BATCH_SIZE = 5000
+DEFAULT_BATCH_SIZE = 500
 
 TESTED_SOURCES = {
     "lowyat",
     "cari",
     "reddit-bolehland",
     "reddit-indonesia",
-    "hplt-malay",
-    "hplt-indonesia",
     "books-ocr",
 }
+
+# hplt-malay and hplt-indonesia intentionally excluded: raw hplt_* tables paused;
+# unified_documents/texts/lid still receive all sources via do_unified_docs.
 
 logging.basicConfig(
     level=logging.INFO,
@@ -666,45 +667,71 @@ async def insert_lid_metadata(
 
 
 async def process_batch(
-    conn: asyncpg.Connection, df: pd.DataFrame, source_id_map: dict, dry_run: bool
+    pool: asyncpg.Pool, df: pd.DataFrame, source_id_map: dict, dry_run: bool
 ):
-    tr = conn.transaction()
-    await tr.start()
-    try:
-        for src, grp in df.groupby("cleaning_source"):
-            if src not in TESTED_SOURCES:
-                log.warning("Skipping untested source: %s (%d rows)", src, len(grp))
-                continue
-            if src == "lowyat":
-                await insert_lowyat_threads(conn, grp)
-                await insert_lowyat_posts(conn, grp)
-            elif src == "cari":
-                await insert_cari_threads(conn, grp)
-                await insert_cari_posts(conn, grp)
-            elif src == "reddit-bolehland":
-                await insert_reddit_posts(conn, grp, "reddit_bolehland_posts")
-            elif src == "reddit-indonesia":
-                await insert_reddit_posts(conn, grp, "reddit_indonesia_posts")
-            elif src == "hplt-malay":
-                await insert_hplt(conn, grp, "hplt_malay_documents")
-            elif src == "hplt-indonesia":
-                await insert_hplt(conn, grp, "hplt_indonesia_documents")
-            elif src == "books-ocr":
-                await insert_ocr_books(conn, grp)
-            elif src == "fineweb":
-                await insert_fineweb(conn, grp)
+    if dry_run:
+        return
 
-        doc_id_map = await insert_unified_documents(conn, df, source_id_map)
-        await insert_unified_texts(conn, df, doc_id_map)
-        await insert_lid_metadata(conn, df, doc_id_map)
+    source_groups = {
+        src: grp
+        for src, grp in df.groupby("cleaning_source")
+        if src in TESTED_SOURCES
+    }
+    skipped = set(df["cleaning_source"].unique()) - TESTED_SOURCES
+    for src in skipped:
+        log.warning("Skipping untested source: %s", src)
 
-        if dry_run:
-            await tr.rollback()
-        else:
-            await tr.commit()
-    except Exception:
-        await tr.rollback()
-        raise
+    async def do_source(src, grp):
+        if src == "lowyat":
+            async def _threads():
+                async with pool.acquire() as c:
+                    await insert_lowyat_threads(c, grp)
+            async def _posts():
+                async with pool.acquire() as c:
+                    await insert_lowyat_posts(c, grp)
+            await asyncio.gather(_threads(), _posts())
+        elif src == "cari":
+            async def _threads():
+                async with pool.acquire() as c:
+                    await insert_cari_threads(c, grp)
+            async def _posts():
+                async with pool.acquire() as c:
+                    await insert_cari_posts(c, grp)
+            await asyncio.gather(_threads(), _posts())
+        elif src == "reddit-bolehland":
+            async with pool.acquire() as c:
+                await insert_reddit_posts(c, grp, "reddit_bolehland_posts")
+        elif src == "reddit-indonesia":
+            async with pool.acquire() as c:
+                await insert_reddit_posts(c, grp, "reddit_indonesia_posts")
+        elif src == "hplt-malay":
+            async with pool.acquire() as c:
+                await insert_hplt(c, grp, "hplt_malay_documents")
+        elif src == "hplt-indonesia":
+            async with pool.acquire() as c:
+                await insert_hplt(c, grp, "hplt_indonesia_documents")
+        elif src == "books-ocr":
+            async with pool.acquire() as c:
+                await insert_ocr_books(c, grp)
+        elif src == "fineweb":
+            async with pool.acquire() as c:
+                await insert_fineweb(c, grp)
+
+    async def do_unified_docs():
+        async with pool.acquire() as c:
+            return await insert_unified_documents(c, df, source_id_map)
+
+    # Wave 1: all source-specific inserts + unified_documents in parallel.
+    # insert_unified_documents only reads df (no mutation) — safe to run concurrently.
+    results = await asyncio.gather(
+        *[do_source(src, grp) for src, grp in source_groups.items()],
+        do_unified_docs(),
+    )
+    doc_id_map = results[-1]
+
+    # Wave 2: unified_texts only (lid_metadata ingestion paused).
+    async with pool.acquire() as c:
+        await insert_unified_texts(c, df, doc_id_map)
 
 
 # ── File ingestion ────────────────────────────────────────────────────────────
@@ -720,35 +747,73 @@ async def ingest_file_async(
     fname = pf_path.name
     log.info("Starting %s", fname)
 
-    conn = await asyncpg.connect(dsn)
-    await conn.execute("SET TIME ZONE 'UTC'")
-    total_rows = 0
+    async def _init_conn(conn):
+        await conn.execute("SET TIME ZONE 'UTC'")
 
-    try:
+    pool = await asyncpg.create_pool(dsn, min_size=2, max_size=4, command_timeout=120, init=_init_conn)
+
+    queue: asyncio.Queue = asyncio.Queue(maxsize=2)
+    read_error: list = []
+
+    async def reader():
+        # Track cancellation so we don't block on queue.put(None) after writer fails.
+        cancelled = False
         loop = asyncio.get_running_loop()
         duck = duckdb.connect()
-        duck.execute("SET memory_limit='3GB'")
+        duck.execute("SET memory_limit='1GB'")
         duck.execute("SET threads=2")
-        cursor = duck.execute(f"SELECT * FROM read_parquet('{pf_path}')")
-        columns = [d[0] for d in cursor.description]
+        try:
+            cursor = duck.execute(f"SELECT * FROM read_parquet('{pf_path}')")
+            columns = [d[0] for d in cursor.description]
+            while True:
+                rows = await loop.run_in_executor(None, cursor.fetchmany, batch_size)
+                if not rows:
+                    break
+                await queue.put(pd.DataFrame(rows, columns=columns))
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        except Exception as e:
+            read_error.append(e)
+        finally:
+            duck.close()
+            if not cancelled:
+                await queue.put(None)  # signal writer we're done
+
+    async def writer():
+        total = 0
         batch_idx = 0
         while True:
-            rows = await loop.run_in_executor(None, cursor.fetchmany, batch_size)
-            if not rows:
+            df = await queue.get()
+            if df is None:
                 break
-            df = pd.DataFrame(rows, columns=columns)
             n = len(df)
-            await process_batch(conn, df, source_id_map, dry_run)
-            del df, rows
+            await process_batch(pool, df, source_id_map, dry_run)
+            del df
             gc.collect()
             if _libc:
                 _libc.malloc_trim(0)
-            total_rows += n
+            total += n
             log.info("  %s batch %d: %d rows", fname, batch_idx, n)
             batch_idx += 1
-        duck.close()
+        return total
+
+    # Run reader as a background Task so we can cancel it if writer fails.
+    # asyncio.gather() does NOT cancel siblings on exception, causing deadlock
+    # when writer fails and queue is full — hence the explicit cancel pattern.
+    reader_task = asyncio.create_task(reader())
+    try:
+        total_rows = await writer()
+    except Exception:
+        reader_task.cancel()
+        await asyncio.gather(reader_task, return_exceptions=True)
+        raise
     finally:
-        await conn.close()
+        await pool.close()
+
+    await reader_task  # wait for reader to finish; re-raises if it had an error
+    if read_error:
+        raise read_error[0]
 
     log.info("Done %s — %d rows", fname, total_rows)
     return fname, total_rows
