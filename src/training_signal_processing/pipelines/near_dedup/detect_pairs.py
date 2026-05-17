@@ -92,14 +92,19 @@ def _compute_partial_pairs(
     Returns (band_groups_seen, pair_rows_written).
     """
     wlog = logging.getLogger(f"{__name__}.phase2w{worker_id}")
-    conn = psycopg2.connect(conn_str)
+    # Two connections: the read connection holds the server-side cursor open for
+    # the whole GROUP BY scan and is NEVER committed (committing a named cursor's
+    # transaction mid-iteration invalidates the cursor). The write connection
+    # owns the COPY flushes and commits independently.
+    read_conn = psycopg2.connect(conn_str)
+    write_conn = psycopg2.connect(conn_str)
     try:
         local: dict[tuple[int, int], int] = defaultdict(int)
         groups = 0
         rows_written = 0
         t0 = time.monotonic()
 
-        with conn.cursor(name=f"band_groups_w{worker_id}") as cur:
+        with read_conn.cursor(name=f"band_groups_w{worker_id}") as cur:
             cur.itersize = 5_000
             cur.execute(
                 """
@@ -118,7 +123,7 @@ def _compute_partial_pairs(
                         local[(di, docs[j])] += 1  # docs sorted → di < docs[j]
                 groups += 1
                 if len(local) >= cfg.copy_buffer_rows:
-                    rows_written += _flush_pair_counts(conn, local)
+                    rows_written += _flush_pair_counts(write_conn, local)
                     local = defaultdict(int)
                 if groups % 50_000 == 0:
                     elapsed = time.monotonic() - t0
@@ -128,14 +133,15 @@ def _compute_partial_pairs(
                         worker_id, band_indexes, groups, rows_written, rate,
                     )
 
-        rows_written += _flush_pair_counts(conn, local)
+        rows_written += _flush_pair_counts(write_conn, local)
         wlog.info(
             "phase2 w%d done  bands=%s  groups=%d  pair_rows=%d  elapsed=%.0fs",
             worker_id, band_indexes, groups, rows_written, time.monotonic() - t0,
         )
         return groups, rows_written
     finally:
-        conn.close()
+        read_conn.close()
+        write_conn.close()
 
 
 # ---------------------------------------------------------------------------
