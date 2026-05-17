@@ -33,3 +33,4 @@ infra/current-machine
 .ipynb_checkpoints/
 .claude
 final_output
+exports
