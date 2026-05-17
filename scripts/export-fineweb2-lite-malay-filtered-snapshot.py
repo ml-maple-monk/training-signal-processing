@@ -52,6 +52,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile-name", default=DEFAULT_PROFILE_NAME)
     parser.add_argument("--run-id", default=DEFAULT_RUN_ID)
     parser.add_argument("--source", action="append", dest="sources", default=[])
+    parser.add_argument(
+        "--lid-label",
+        action="append",
+        dest="lid_labels",
+        default=[],
+        help="Restrict export to these lid_label partitions (repeatable). "
+        "Empty exports all labels.",
+    )
     parser.add_argument("--source-concurrency", type=int, default=2)
     parser.add_argument("--rows-per-shard", type=int, default=DEFAULT_ROWS_PER_SHARD)
     parser.add_argument("--prefetch", type=int, default=DEFAULT_PREFETCH)
@@ -240,8 +248,12 @@ async def list_index_sources(args: argparse.Namespace) -> list[str]:
     return [str(row["source_domain"]) for row in rows]
 
 
-def build_index_export_query(index_table: str, source_limit: int) -> str:
+def build_index_export_query(
+    index_table: str, source_limit: int, *, filter_lid: bool
+) -> str:
     limit_clause = f"LIMIT {int(source_limit)}" if source_limit > 0 else ""
+    # $4 is the optional lid_label allowlist (asyncpg array param).
+    lid_clause = "AND i.lid_label = ANY($4)" if filter_lid else ""
     return f"""
         SELECT
             i.run_id,
@@ -258,6 +270,7 @@ def build_index_export_query(index_table: str, source_limit: int) -> str:
           AND i.run_id = $2
           AND i.source_domain = $3
           AND t.cleaned_text IS NOT NULL
+          {lid_clause}
         {limit_clause}
     """
 
@@ -269,7 +282,8 @@ async def export_index_source(
     source_domain: str,
 ) -> tuple[int, int, dict[tuple[str, str, str], int]]:
     index_table = validate_identifier(args.index_table)
-    query = build_index_export_query(index_table, args.limit)
+    filter_lid = bool(args.lid_labels)
+    query = build_index_export_query(index_table, args.limit, filter_lid=filter_lid)
     buffers: defaultdict[tuple[str, str, str], list[asyncpg.Record]] = defaultdict(list)
     shard_indexes: defaultdict[tuple[str, str, str], int] = defaultdict(int)
     partition_counts: defaultdict[tuple[str, str, str], int] = defaultdict(int)
@@ -280,11 +294,12 @@ async def export_index_source(
     try:
         await conn.execute("SET statement_timeout = '0'")
         async with conn.transaction(readonly=True):
+            cursor_args = [args.profile_name, args.run_id, source_domain]
+            if filter_lid:
+                cursor_args.append(args.lid_labels)
             async for row in conn.cursor(
                 query,
-                args.profile_name,
-                args.run_id,
-                source_domain,
+                *cursor_args,
                 prefetch=args.prefetch,
             ):
                 key = (row["run_id"], row["source_domain"], row["lid_label"])
