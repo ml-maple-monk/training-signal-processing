@@ -36,6 +36,8 @@ The schema has three layers:
 │            hplt_indonesia_documents                                 │
 │            sea_pile_malay_documents   ← raw, not yet in unified    │
 │            fineweb_documents                                        │
+│            fineweb_edu_documents      → promoted into unified      │
+│  Derived:  fine-web-edu-malay-translate  (no raw table; Qwen3 MT)  │
 │  Books:    ocr_books                                               │
 └─────────────────────────────────────────────────────────────────────┘
                             │  (ingest pipeline populates both layers)
@@ -140,7 +142,10 @@ The schema has three layers:
 │          │  …_hplt_malay         │                                │
 │          │  …_hplt_indonesia     │   ┌─────────────────────────┐ │
 │          │  …_fineweb            │   │      quality_signals     │ │
-│          │  …_sea_pile_malay     │   ├─────────────────────────┤ │
+│          │  …_fineweb_edu        │   ├─────────────────────────┤ │
+│          │  …_fine_web_edu_      │   │                          │ │
+│          │     malay_translate   │   │                          │ │
+│          │  …_sea_pile_malay     │   │                          │ │
 │          │  …_default            │   │ PK/FK doc_id  BIGINT    │◄┘
 │          └───────────────────────┘   │ PK/FK run_id  INTEGER   │◄──┐
 │                                      │    score      REAL       │   │
@@ -262,6 +267,22 @@ The schema has three layers:
 │  │    language   TEXT               │                            │
 │  │    content    TEXT (lz4)         │                            │
 │  └──────────────────────────────────┘                            │
+│                                                                   │
+│  ┌──────────────────────────────────┐  → promoted into unified   │
+│  │      fineweb_edu_documents       │                            │
+│  ├──────────────────────────────────┤                            │
+│  │ PK id            BIGINT IDENTITY │                            │
+│  │    hf_id         TEXT NOT NULL   │  'id', 47-char UUID, UNIQUE│
+│  │    url           TEXT            │                            │
+│  │    dump          TEXT            │  CC-MAIN-2024-51 etc.      │
+│  │    file_path     TEXT            │  S3 source path            │
+│  │    language      TEXT            │  always 'en'               │
+│  │    language_score REAL           │                            │
+│  │    source_token_count BIGINT     │  dataset's own token_count │
+│  │    edu_score     REAL            │  'score' continuous        │
+│  │    edu_int_score SMALLINT        │  'int_score' 3-5           │
+│  │    content       TEXT (lz4)      │  'text'; sole copy         │
+│  └──────────────────────────────────┘                            │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -276,7 +297,7 @@ Registry of all corpus sources. One row per source, seeded at DB init.
 | Column | Type | Notes |
 |---|---|---|
 | `source_id` | SMALLINT IDENTITY | PK |
-| `source_name` | TEXT UNIQUE | `'lowyat'`, `'cari'`, `'reddit-bolehland'`, `'reddit-indonesia'`, `'hplt-malay'`, `'hplt-indonesia'`, `'books-ocr'`, `'fineweb'`, `'sea-pile-malay'` |
+| `source_name` | TEXT UNIQUE | `'lowyat'`, `'cari'`, `'reddit-bolehland'`, `'reddit-indonesia'`, `'hplt-malay'`, `'hplt-indonesia'`, `'books-ocr'`, `'fineweb'`, `'sea-pile-malay'`, `'fineweb-edu'`, `'fine-web-edu-malay-translate'` |
 | `source_type` | TEXT | `'forum'`, `'reddit'`, `'web'`, `'books'` |
 | `description` | TEXT | Human-readable description |
 | `created_at` | TIMESTAMPTZ | |
@@ -360,7 +381,7 @@ WHERE sample_key BETWEEN 0 AND 0.01 * (1::BIGINT << 62)
 
 Partitioned table holding the cleaned text for each document. Partitioned by `cleaning_source` (LIST) so TOAST segments are isolated per source.
 
-**Partitions:** `…_books_ocr`, `…_lowyat`, `…_cari`, `…_reddit_bolehland`, `…_reddit_indonesia`, `…_hplt_malay`, `…_hplt_indonesia`, `…_fineweb`, `…_sea_pile_malay`, `…_default`
+**Partitions:** `…_books_ocr`, `…_lowyat`, `…_cari`, `…_reddit_bolehland`, `…_reddit_indonesia`, `…_hplt_malay`, `…_hplt_indonesia`, `…_fineweb`, `…_fineweb_edu`, `…_fine_web_edu_malay_translate`, `…_sea_pile_malay`, `…_default`
 
 | Column | Type | Notes |
 |---|---|---|
@@ -596,6 +617,101 @@ Schema placeholder for HuggingFace FineWeb. Not yet ingested.
 
 ---
 
+### `fineweb_edu_documents`
+
+**Raw provenance table for HuggingFace FineWeb-Edu** (English educational-filtered
+web corpus). Ingested directly from HuggingFace (`HuggingFaceFW/fineweb-edu`),
+default subset `sample/100BT`, by `scripts/ingest_fineweb_edu.py`.
+
+Unlike `sea-pile-malay`, fineweb-edu is **promoted into the unified layer during
+ingest** (no cleaning pipeline): each row also lands in `unified_documents`
+(`cleaning_source='fineweb-edu'`, `sample_uid='fineweb-edu://<hf_id>'`,
+cleaned text == original — no cleaning applied) and `unified_document_texts`
+(`…_fineweb_edu` partition). Because it is a curated, language-filtered English
+corpus, the Malaya LID model is **not** run — every doc gets a
+`document_language_detection` row with `language_label='standard-english'`,
+`confidence=1.0` assigned directly.
+
+`hf_id` is the source `id` (47-char UUID), `UNIQUE` for resume-safe
+`ON CONFLICT DO NOTHING` ingest. `edu_score` / `edu_int_score` are the dataset's
+own intrinsic quality fields (not produced by our `quality_signals` pipeline).
+The HF `date` field is empty in the parquet sample subsets, so it is not stored.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | BIGINT IDENTITY | PK (synthetic) |
+| `hf_id` | TEXT NOT NULL UNIQUE | Source `id`, 47-char UUID |
+| `url` | TEXT | |
+| `dump` | TEXT | CC snapshot: `CC-MAIN-2024-51` etc. |
+| `file_path` | TEXT | S3 source path |
+| `language` | TEXT | Always `en` |
+| `language_score` | REAL | LID confidence (0.65–1.0) |
+| `source_token_count` | BIGINT | Dataset's own `token_count` |
+| `edu_score` | REAL | Continuous edu quality (2.52–5.06) |
+| `edu_int_score` | SMALLINT | Discrete edu rating (3–5) |
+| `content` | TEXT (lz4) | Source `text`; copied verbatim into `unified_document_texts` |
+| `created_at` | TIMESTAMPTZ | |
+
+```sql
+-- Distribution by edu rating
+SELECT edu_int_score, COUNT(*) FROM fineweb_edu_documents
+GROUP BY 1 ORDER BY 1;
+```
+
+---
+
+### `fine-web-edu-malay-translate` (derived source — no raw table)
+
+**Malay machine translation of `fineweb-edu`.** Produced by
+`scripts/translate_fineweb_edu_malay.py`, which reads `cleaning_source=
+'fineweb-edu'` unified docs, translates them to Malay with `Qwen/Qwen3-14B-AWQ`
+served by vLLM (thinking mode; the proven recipe in
+`scripts/serve_qwen3_translate.sh`), and writes straight into the unified layer.
+There is **no per-source raw table** — provenance is implicit in `sample_uid`.
+
+Conventions for the `unified_documents` rows it writes:
+
+| Field | Value |
+|---|---|
+| `cleaning_source` | `fine-web-edu-malay-translate` |
+| `sample_uid` | `fine-web-edu-malay-translate://<hf_id>` (origin is `fineweb-edu://<hf_id>`) |
+| `original_text_sha256` | hash of the English source (origin `cleaned_text_sha256`) |
+| `cleaned_text_sha256` | hash of the Malay translation (distinct → no `cleaned_hash_ux` clash) |
+| `original_char_count` | origin `original_char_count` (English) |
+| `cleaned_char_count` | length of the Malay text |
+| `approximate_*_token_count` | origin (original) / Qwen-tokenizer count (Malay) |
+| `cleaning_rules_triggered` | `{qwen3-14b-awq-en-ms-translate}` (tags the model/transform) |
+| `source_object_key` / `source_parquet_url` / `source_row_index` | carried from the origin fineweb-edu row |
+
+The translator also writes `document_language_detection` rows with
+`language_label='standard-malay'`, `confidence=1.0` (direct assignment, no LID
+model run — analogous to fineweb-edu's `standard-english`).
+
+The Qwen3 thinking-mode reasoning trace that produced each translation is kept
+in **`document_translation_thinking`** (one row per translation `doc_id`,
+FK → `unified_documents`; `thinking_text` lz4 + `thinking_char_count` +
+`thinking_token_count`; multi-chunk docs concatenate their `<think>` bodies).
+Created by `scripts/migrations/add_document_translation_thinking_table.sql`.
+
+```sql
+-- A translation joined back to its English origin doc
+SELECT mt.doc_id        AS ms_doc_id,
+       en.doc_id         AS en_doc_id,
+       mt_t.cleaned_text AS malay,
+       en_t.cleaned_text AS english
+FROM unified_documents mt
+JOIN unified_document_texts mt_t USING (doc_id)
+JOIN unified_documents en
+  ON en.cleaning_source = 'fineweb-edu'
+ AND en.sample_uid = 'fineweb-edu://'
+     || split_part(mt.sample_uid, '://', 2)
+JOIN unified_document_texts en_t ON en_t.doc_id = en.doc_id
+WHERE mt.cleaning_source = 'fine-web-edu-malay-translate'
+LIMIT 5;
+```
+
+---
+
 ## Views
 
 ### `training_manifest` (materialized)
@@ -668,6 +784,8 @@ ORDER BY score DESC;
 | `hplt_malay_url_idx` | hplt_malay_documents | B-tree | URL lookup |
 | `hplt_malay_lang_idx` | hplt_malay_documents | B-tree | Language filter |
 | `sea_pile_malay_dump_idx` | sea_pile_malay_documents | B-tree | Filter by CC snapshot |
+| `fineweb_edu_dump_idx` | fineweb_edu_documents | B-tree | Filter by CC snapshot |
+| `fineweb_edu_int_score_idx` | fineweb_edu_documents | B-tree | Edu quality-rating filter |
 | `quality_signals_run_score_idx` | quality_signals | B-tree (run_id, score DESC) | Per-run manifest export |
 | `lid_metadata_lingua_lang_idx` | lid_metadata | B-tree | Language filter |
 | `training_manifest_doc_id_ux` | training_manifest | UNIQUE B-tree | Enables CONCURRENTLY refresh |
@@ -771,3 +889,5 @@ ORDER BY 1;
 | `books-ocr` | `ocr_books` | Yes | |
 | `sea-pile-malay` | `sea_pile_malay_documents` | **No** — raw ingest only; cleaning pipeline pending |
 | `fineweb` | `fineweb_documents` | No | Schema placeholder; not yet ingested |
+| `fineweb-edu` | `fineweb_edu_documents` | **Yes** — promoted during ingest (no cleaning); LID assigned directly as `standard-english` (no model run) |
+| `fine-web-edu-malay-translate` | *derived (no raw table)* | **Yes** — translated from fineweb-edu via Qwen3-14B-AWQ (vLLM, thinking mode); LID assigned directly as `standard-malay` (no model run) |
