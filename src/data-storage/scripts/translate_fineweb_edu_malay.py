@@ -167,10 +167,12 @@ def _split_think(content: str) -> tuple[str, str]:
     return translation, thinking.strip()
 
 
-async def _translate_doc(
-    client, args, english: str, sem: asyncio.Semaphore
-) -> tuple[str, str]:
-    """Return (malay_text, thinking_text); chunks concatenated with a blank line."""
+async def _translate_doc(client, args, english: str) -> tuple[str, str]:
+    """Return (malay_text, thinking_text); chunks concatenated with a blank line.
+
+    One in-flight doc == one worker slot; multi-chunk docs translate their chunks
+    sequentially within that worker (concurrency is bounded by the worker pool).
+    """
     if args.no_llm:
         return english, ""  # exercises read+chunk+write without a GPU
     budget = args.max_model_len - args.max_output_tokens - args.prompt_overhead
@@ -178,22 +180,21 @@ async def _translate_doc(
     out: list[str] = []
     thinks: list[str] = []
     for chunk in chunks:
-        async with sem:
-            resp = await client.chat.completions.create(
-                model=args.model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": chunk},
-                ],
-                temperature=args.temperature,
-                top_p=args.top_p,
-                max_tokens=args.max_output_tokens,
-                stop=[],  # thinking mode emits \n\n constantly
-                extra_body={
-                    "top_k": args.top_k,
-                    "chat_template_kwargs": {"enable_thinking": True},
-                },
-            )
+        resp = await client.chat.completions.create(
+            model=args.model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": chunk},
+            ],
+            temperature=args.temperature,
+            top_p=args.top_p,
+            max_tokens=args.max_output_tokens,
+            stop=[],  # thinking mode emits \n\n constantly
+            extra_body={
+                "top_k": args.top_k,
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+        )
         translation, thinking = _split_think(resp.choices[0].message.content or "")
         if translation:
             out.append(translation)
@@ -362,9 +363,12 @@ async def run(args) -> None:
 
         client = AsyncOpenAI(base_url=args.base_url, api_key=args.api_key)
 
-    conn = await asyncpg.connect(args.dsn)
+    # Separate connections: producer reads, committer writes (an asyncpg
+    # connection is not safe for concurrent use by multiple coroutines).
+    read_conn = await asyncpg.connect(args.dsn)
+    write_conn = await asyncpg.connect(args.dsn)
     try:
-        srow = await conn.fetchrow(
+        srow = await read_conn.fetchrow(
             "SELECT source_id FROM data_sources WHERE source_name = $1", SOURCE
         )
         if srow is None:
@@ -373,48 +377,111 @@ async def run(args) -> None:
                 "scripts/migrations/add_fine_web_edu_malay_translate.sql first"
             )
         source_id = srow["source_id"]
-        sem = asyncio.Semaphore(args.concurrency)
-
-        last_doc_id = 0
-        total = 0
         prefix = f"{SOURCE}://"
-        while True:
-            limit = args.batch_size
-            if args.limit:
-                limit = min(limit, args.limit - total)
-            if limit <= 0:
-                break
-            page = await conn.fetch(
-                READ_SQL, ORIGIN_SOURCE, last_doc_id, SOURCE, prefix, limit
-            )
-            if not page:
-                break
-            last_doc_id = page[-1]["doc_id"]
 
-            translations = await asyncio.gather(
-                *(_translate_doc(client, args, r["cleaned_text"], sem) for r in page)
-            )
-            rows = []
-            for r, (malay, thinking) in zip(page, translations):
-                if not malay.strip():
-                    log.warning("empty translation for doc_id=%s — skipped", r["doc_id"])
-                    continue
-                rows.append({**dict(r), "malay": malay, "thinking": thinking})
+        # Backpressure: producer blocks once the queue holds ~2x concurrency,
+        # so we never read thousands of docs ahead of the workers.
+        work_q: asyncio.Queue = asyncio.Queue(maxsize=args.concurrency * 2)
+        done_q: asyncio.Queue = asyncio.Queue()
+        worker_fin = object()  # a worker has drained and exited
+        stats = {"produced": 0, "translated": 0, "skipped": 0, "committed": 0}
 
-            if rows:
-                await _write_batch(conn, source_id, rows, args.dry_run)
-            total += len(page)
-            log.info(
-                "batch: read %d, wrote %d (total read %d)%s",
-                len(page), len(rows), total,
-                " [DRY-RUN rollback]" if args.dry_run else "",
-            )
-            if args.limit and total >= args.limit:
-                break
-        log.info("done — %d docs processed%s", total,
-                 " (dry-run, nothing committed)" if args.dry_run else "")
+        async def producer() -> None:
+            last_doc_id = 0
+            try:
+                while True:
+                    page_n = args.batch_size
+                    if args.limit:
+                        page_n = min(page_n, args.limit - stats["produced"])
+                    if page_n <= 0:
+                        break
+                    page = await read_conn.fetch(
+                        READ_SQL, ORIGIN_SOURCE, last_doc_id, SOURCE, prefix, page_n
+                    )
+                    if not page:
+                        break
+                    last_doc_id = page[-1]["doc_id"]
+                    for r in page:
+                        await work_q.put(dict(r))  # blocks when full → backpressure
+                        stats["produced"] += 1
+                    if args.limit and stats["produced"] >= args.limit:
+                        break
+            finally:
+                for _ in range(args.concurrency):
+                    await work_q.put(None)  # stop sentinel per worker
+
+        async def worker() -> None:
+            while True:
+                item = await work_q.get()
+                if item is None:
+                    await done_q.put(worker_fin)
+                    return
+                malay, thinking = await _translate_doc(
+                    client, args, item["cleaned_text"]
+                )
+                if malay.strip():
+                    await done_q.put({**item, "malay": malay, "thinking": thinking})
+                    stats["translated"] += 1
+                else:
+                    stats["skipped"] += 1
+                    log.warning(
+                        "empty translation for doc_id=%s — skipped", item["doc_id"]
+                    )
+
+        async def committer() -> None:
+            buf: list[dict] = []
+
+            async def flush() -> None:
+                if not buf:
+                    return
+                n = len(buf)
+                await _write_batch(write_conn, source_id, buf, args.dry_run)
+                stats["committed"] += n
+                log.info(
+                    "committed %d (committed=%d translated=%d produced=%d "
+                    "queued=%d)%s",
+                    n, stats["committed"], stats["translated"],
+                    stats["produced"], work_q.qsize(),
+                    " [DRY-RUN rollback]" if args.dry_run else "",
+                )
+                buf.clear()
+
+            workers_left = args.concurrency
+            try:
+                while workers_left > 0 or not done_q.empty():
+                    try:
+                        item = await asyncio.wait_for(
+                            done_q.get(), timeout=args.commit_interval
+                        )
+                    except asyncio.TimeoutError:
+                        await flush()  # bound latency: don't sit on finished docs
+                        continue
+                    if item is worker_fin:
+                        workers_left -= 1
+                        continue
+                    buf.append(item)
+                    if len(buf) >= args.commit_size:
+                        await flush()
+                await flush()
+            finally:
+                if buf and not args.dry_run:
+                    try:
+                        await flush()
+                    except Exception:
+                        log.exception("final flush failed; %d docs uncommitted "
+                                       "(resume-safe — rerun)", len(buf))
+
+        await asyncio.gather(producer(), committer(),
+                             *[worker() for _ in range(args.concurrency)])
+        log.info(
+            "done — produced=%d translated=%d skipped=%d committed=%d%s",
+            stats["produced"], stats["translated"], stats["skipped"],
+            stats["committed"],
+            " (dry-run, nothing committed)" if args.dry_run else "",
+        )
     finally:
-        await conn.close()
+        await read_conn.close()
+        await write_conn.close()
 
 
 def main() -> None:
@@ -423,8 +490,16 @@ def main() -> None:
     p.add_argument("--base-url", default=DEFAULT_BASE_URL)
     p.add_argument("--api-key", default="translate")
     p.add_argument("--model", default=DEFAULT_MODEL)
-    p.add_argument("--batch-size", type=int, default=64)
-    p.add_argument("--concurrency", type=int, default=8)
+    p.add_argument("--batch-size", type=int, default=64,
+                   help="DB read page size (docs fetched per anti-join query)")
+    p.add_argument("--concurrency", type=int, default=8,
+                   help="in-flight docs (worker-pool size); backpressure caps "
+                        "the read queue at 2x this")
+    p.add_argument("--commit-size", type=int, default=6,
+                   help="flush a commit once this many docs have finished "
+                        "(finished docs do NOT wait for slow ones)")
+    p.add_argument("--commit-interval", type=float, default=30.0,
+                   help="also flush any finished docs at least this often (s)")
     p.add_argument("--max-output-tokens", type=int, default=8192)
     p.add_argument("--max-model-len", type=int, default=32768)
     p.add_argument("--prompt-overhead", type=int, default=256)
